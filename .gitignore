@@ -31,6 +31,7 @@ logs/
 wechatauto_logs/
 *.log
 @AutomationLog.txt
+manager.lock
 artifacts/
 .release/
 .ruff_cache/

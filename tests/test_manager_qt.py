@@ -8,7 +8,7 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
 
 from agent_bridge.application_paths import ApplicationPaths
 from agent_bridge.manager.config_document import ConfigDocument
@@ -111,6 +111,186 @@ def test_manager_window_displays_legacy_chinese_log(qt_app, tmp_path: Path) -> N
 
         assert window.log_view.toPlainText() == "收到微信消息\n"
     finally:
+        window.request_exit()
+
+
+@pytest.mark.parametrize("extra_lines", [3, 3000])
+@pytest.mark.parametrize("position", ["top", "middle", "near_bottom"])
+def test_log_pauses_while_reading_and_resumes_only_at_bottom(
+    qt_app, tmp_path, extra_lines, position
+):
+    window = make_window(tmp_path)
+    try:
+        window._initial_checks_pending = False
+        window._log_timer.stop()
+        window.tabs.setCurrentWidget(window.log_view.parentWidget())
+        window.show()
+        qt_app.processEvents()
+        original = "".join(f"旧日志 {i:04d} {'x' * 200}\n" for i in range(200))
+        window.paths.workbench_log.write_text(original, encoding="utf-8")
+        window._refresh_log()
+        qt_app.processEvents()
+        view = window.log_view
+        vertical = view.verticalScrollBar()
+        horizontal = view.horizontalScrollBar()
+        assert vertical.maximum() > 10
+        assert vertical.value() == vertical.maximum()
+        assert horizontal.maximum() > 0
+        reading_position = {
+            "top": 0, "middle": vertical.maximum() // 2,
+            "near_bottom": vertical.maximum() - 1,
+        }[position]
+        vertical.setValue(reading_position)
+        horizontal.setValue(horizontal.maximum() // 2)
+        horizontal_position = horizontal.value()
+        first_line = view.firstVisibleBlock().blockNumber()
+
+        # The larger case pushes old lines outside the on-disk 128 KiB tail.
+        incoming = "".join(f"新日志 {i:04d} {'y' * 200}\n" for i in range(extra_lines))
+        window.paths.workbench_log.write_text(original + incoming, encoding="utf-8")
+        for _ in range(3):
+            window._refresh_log()
+            qt_app.processEvents()
+            assert view.toPlainText() == original
+            assert vertical.value() == reading_position
+            assert horizontal.value() == horizontal_position
+            assert view.firstVisibleBlock().blockNumber() == first_line
+
+        vertical.setValue(vertical.maximum())
+        window._refresh_log()
+        qt_app.processEvents()
+        assert view.toPlainText().endswith(incoming.splitlines()[-1] + "\n")
+        assert vertical.value() == vertical.maximum()
+
+        with window.paths.workbench_log.open("a", encoding="utf-8") as handle:
+            handle.write("继续跟随新日志\n")
+        window._refresh_log()
+        qt_app.processEvents()
+        assert view.toPlainText().endswith("继续跟随新日志\n")
+        assert vertical.value() == vertical.maximum()
+    finally:
+        window.request_exit()
+
+
+def test_log_does_not_refresh_during_scrollbar_drag(qt_app, tmp_path):
+    window = make_window(tmp_path)
+    try:
+        window.paths.workbench_log.write_text("旧日志\n", encoding="utf-8")
+        window._refresh_log()
+        scrollbar = window.log_view.verticalScrollBar()
+        scrollbar.setSliderDown(True)
+        window.paths.workbench_log.write_text("旧日志\n新日志\n", encoding="utf-8")
+        window._refresh_log()
+        assert window.log_view.toPlainText() == "旧日志\n"
+        scrollbar.setSliderDown(False)
+        window._refresh_log()
+        assert window.log_view.toPlainText() == "旧日志\n新日志\n"
+    finally:
+        window.request_exit()
+
+
+def test_clear_log_truncates_only_workbench_log_and_keeps_following(qt_app, tmp_path):
+    window = make_window(tmp_path)
+    try:
+        log_path = window.paths.workbench_log
+        preserved = [
+            window.paths.manager_log, log_path.with_suffix(".log.1"),
+            window.paths.data_dir / "history.db",
+        ]
+        for path in preserved:
+            path.write_bytes(b"keep this data")
+        with log_path.open("ab", buffering=0) as writer:
+            writer.write("旧日志\n".encode())
+            window._refresh_log()
+            window._log_follow_tail = False
+            button = next(b for b in window.findChildren(QPushButton) if b.text() == "清空日志")
+            button.click()
+            assert log_path.read_bytes() == b""
+            assert window.log_view.toPlainText() == ""
+            assert window._log_follow_tail is True
+            window._refresh_log()
+            assert window.log_view.toPlainText() == ""
+            writer.write("新日志\n".encode())
+            window._refresh_log()
+            assert log_path.read_bytes() == "新日志\n".encode()
+            assert window.log_view.toPlainText() == "新日志\n"
+        for path in preserved:
+            assert path.read_bytes() == b"keep this data"
+    finally:
+        window.request_exit()
+
+
+def test_clear_missing_log_clears_display_without_creating_file(qt_app, tmp_path):
+    window = make_window(tmp_path)
+    try:
+        window.log_view.setPlainText("旧显示")
+        window._clear_workbench_log()
+        assert window.log_view.toPlainText() == ""
+        assert not window.paths.workbench_log.exists()
+    finally:
+        window.request_exit()
+
+
+def test_clear_log_failure_keeps_display_and_reports_error(qt_app, tmp_path, monkeypatch):
+    window = make_window(tmp_path)
+    try:
+        window.paths.workbench_log.write_text("保留旧日志", encoding="utf-8")
+        window._refresh_log()
+        window._log_follow_tail = False
+        errors = []
+        original_open = Path.open
+
+        def fail_log_write(path, mode="r", *args, **kwargs):
+            if path == window.paths.workbench_log and mode == "r+b":
+                raise PermissionError("测试：无法写入日志")
+            return original_open(path, mode, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", fail_log_write)
+        monkeypatch.setattr(QMessageBox, "critical", lambda *args: errors.append(args[1:]))
+        window._clear_workbench_log()
+        assert window.log_view.toPlainText() == "保留旧日志"
+        assert window.paths.workbench_log.read_text(encoding="utf-8") == "保留旧日志"
+        assert window._log_follow_tail is False
+        assert errors == [("日志清空失败", "测试：无法写入日志")]
+    finally:
+        window.request_exit()
+
+
+def test_clear_log_allows_redirected_child_to_continue_writing(qt_app, tmp_path):
+    import subprocess
+    import sys
+
+    from agent_bridge.logging_setup import open_redirected_log
+
+    window = make_window(tmp_path)
+    child = None
+    try:
+        marker = tmp_path / "child-ready"
+        script = (
+            "import sys; from pathlib import Path; "
+            "print('old log', flush=True); Path(sys.argv[1]).touch(); "
+            "sys.stdin.readline(); print('new log', flush=True)"
+        )
+        with open_redirected_log(window.paths.workbench_log) as writer:
+            child = subprocess.Popen(
+                [sys.executable, "-u", "-c", script, str(marker)],
+                stdin=subprocess.PIPE, stdout=writer, stderr=writer,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        from time import monotonic, sleep
+
+        deadline = monotonic() + 10
+        while not marker.exists() and monotonic() < deadline:
+            sleep(0.01)
+        assert marker.exists()
+        window._clear_workbench_log()
+        child.communicate(b"continue\n", timeout=10)
+        assert child.returncode == 0
+        assert window.paths.workbench_log.read_bytes().replace(b"\r\n", b"\n") == b"new log\n"
+    finally:
+        if child is not None and child.poll() is None:
+            child.kill()
+            child.communicate(timeout=10)
         window.request_exit()
 
 

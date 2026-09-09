@@ -607,9 +607,10 @@ class AgentBridgeManagerWindow(QMainWindow):
         header = QHBoxLayout()
         label = QLabel("工作台日志")
         label.setObjectName("sectionTitle")
-        clear = QPushButton("清空显示")
+        clear = QPushButton("清空日志")
+        clear.setToolTip("清空当前工作台日志文件和显示，无法恢复；不影响聊天记录和其他日志。")
         open_dir = QPushButton("打开日志目录")
-        clear.clicked.connect(self._clear_log_view)
+        clear.clicked.connect(self._clear_workbench_log)
         open_dir.clicked.connect(self._open_log_directory)
         header.addWidget(label)
         header.addStretch(1)
@@ -619,6 +620,10 @@ class AgentBridgeManagerWindow(QMainWindow):
         self.log_view.setReadOnly(True)
         self.log_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.log_view.setStyleSheet("font-family: Consolas, 'Microsoft YaHei UI';")
+        self._log_follow_tail = True
+        self._log_updating = False
+        self.log_view.verticalScrollBar().valueChanged.connect(self._update_log_follow_mode)
+        self.log_view.verticalScrollBar().rangeChanged.connect(self._follow_log_range)
         layout.addLayout(header)
         layout.addWidget(self.log_view, 1)
         return page
@@ -1037,7 +1042,24 @@ class AgentBridgeManagerWindow(QMainWindow):
         widget.style().polish(widget)
         widget.update()
 
+    def _update_log_follow_mode(self, value: int) -> None:
+        if not self._log_updating:
+            self._log_follow_tail = value == self.log_view.verticalScrollBar().maximum()
+
+    def _follow_log_range(self, _minimum: int, maximum: int) -> None:
+        scrollbar = self.log_view.verticalScrollBar()
+        # Qt may update the vertical range again after showing a horizontal
+        # scrollbar. Retain tail-following across that deferred layout pass.
+        if self._log_follow_tail and not scrollbar.isSliderDown():
+            scrollbar.setValue(maximum)
+
     def _refresh_log(self) -> None:
+        scrollbar = self.log_view.verticalScrollBar()
+        # Keep the displayed snapshot intact while reading older lines, even
+        # when the on-disk 128 KiB tail rolls forward. Resume at the next tick
+        # only after the user returns to the bottom and releases the scrollbar.
+        if scrollbar.isSliderDown() or not self._log_follow_tail:
+            return
         if not self.paths.workbench_log.exists():
             return
         try:
@@ -1052,11 +1074,24 @@ class AgentBridgeManagerWindow(QMainWindow):
         except OSError:
             return
         if text != self.log_view.toPlainText():
-            self.log_view.setPlainText(text)
-            scrollbar = self.log_view.verticalScrollBar()
-            scrollbar.setValue(scrollbar.maximum())
+            self._log_updating = True
+            try:
+                self.log_view.setPlainText(text)
+                scrollbar.setValue(scrollbar.maximum())
+            finally:
+                self._log_updating = False
 
-    def _clear_log_view(self) -> None:
+    def _clear_workbench_log(self) -> None:
+        try:
+            # Truncate in place; do not unlink/replace the file held by writers.
+            with self.paths.workbench_log.open("r+b") as handle:
+                handle.truncate(0)
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            QMessageBox.critical(self, "日志清空失败", str(error))
+            return
+        self._log_follow_tail = True
         self.log_view.clear()
 
     def _open_data_directory(self) -> None:

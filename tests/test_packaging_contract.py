@@ -3,6 +3,21 @@ from pathlib import Path
 import pytest
 
 
+def test_readme_demo_asset_exists_and_is_not_ignored():
+    import subprocess
+
+    root = Path(__file__).resolve().parents[1]
+    assert "(assets/manager-demo.gif)" in (root / "README.md").read_text(encoding="utf-8")
+    with (root / "assets" / "manager-demo.gif").open("rb") as handle:
+        assert handle.read(6) in {b"GIF87a", b"GIF89a"}
+    if (root / ".git").exists():
+        result = subprocess.run(
+            ["git", "check-ignore", "--no-index", "assets/manager-demo.gif"],
+            cwd=root, capture_output=True, check=False,
+        )
+        assert result.returncode == 1
+
+
 @pytest.mark.parametrize("arguments", [[], ["manager"]])
 def test_frozen_executable_opens_manager_by_default(monkeypatch, arguments):
     import sys
@@ -28,7 +43,7 @@ def test_git_ignores_local_data_and_binaries_but_not_source():
         "config.yaml", "config.yaml.bak", ".env", ".env.local", "secret.pem",
         "logs/workbench.log", "artifacts/screenshot.png", "wechatauto_logs/test.log",
         "data/bridge.db", "dist/AgentBridge.exe", "@AutomationLog.txt",
-        "doc/internal.md", "docs/internal.md",
+        "doc/internal.md", "docs/internal.md", "manager.lock",
     ]
     result = subprocess.run(
         ["git", "check-ignore", "--stdin", "-z"], input="\0".join(private_paths).encode(),

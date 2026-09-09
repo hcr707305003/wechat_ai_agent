@@ -14,6 +14,7 @@ from typing import Any
 from agent_bridge.application_paths import ApplicationPaths
 from agent_bridge.config import load_config
 from agent_bridge.lifecycle import send_lifecycle_command
+from agent_bridge.logging_setup import open_redirected_log
 
 
 class WorkbenchState(str, Enum):
@@ -112,7 +113,7 @@ class WorkbenchProcessController:
             return current
         self.paths.initialize_user_data()
         self.paths.logs_dir.mkdir(parents=True, exist_ok=True)
-        log_handle = self.paths.workbench_log.open("ab")
+        log_handle = open_redirected_log(self.paths.workbench_log)
         try:
             creation_flags = (
                 getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
