@@ -66,11 +66,13 @@ class CompanionController:
         queued_job_remover: QueuedJobRemover | None = None,
         queued_jobs_clearer: QueuedJobsClearer | None = None,
         context_observer: ContextObserver | None = None,
+        available_providers: tuple[str, ...] | None = None,
     ) -> None:
         self.repository = repository
         self.dispatcher = dispatcher
         self.history_loader = history_loader
         self.default_provider = default_provider
+        self.available_providers = available_providers
         self._retry_delivery = retry_delivery
         self._cancel_delivery = cancel_delivery
         self._resend_delivery = resend_delivery
@@ -860,6 +862,10 @@ class CompanionController:
     def current_provider(self, item: ConversationItem) -> str:
         session = self.repository.find_session_for_binding(*item.binding_key)
         return session.current_provider if session else self.default_provider
+
+    def provider_available(self, item: ConversationItem) -> bool:
+        return (self.available_providers is None
+                or self.current_provider(item) in self.available_providers)
 
     def current_session_status(self, item: ConversationItem) -> str:
         session = self.repository.find_session_for_binding(*item.binding_key)

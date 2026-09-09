@@ -161,6 +161,7 @@ async def test_logs_an_accepted_wechat_message(caplog: pytest.LogCaptureFixture)
     assert [message.content for message in received] == ["hello"]
     assert "收到微信消息" in caplog.text
     assert "conversation=friend" in caplog.text
+    assert '[配置私聊: "friend"] 收到微信消息' in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1092,6 +1093,9 @@ def test_resolves_wechat_id_and_nickname_to_internal_username() -> None:
 
     assert adapter._resolved_private_ids == ("wxid_internal",)
     assert adapter._display_name_cache["wxid_internal"] == "Friend Nick"
+    assert adapter._allowlist_log_labels[(ConversationType.PRIVATE, "wxid_internal")] == (
+        "visible_wechat_id", "Friend Nick"
+    )
 
 
 def test_allowlisted_conversations_include_private_and_group_avatar_urls() -> None:

@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from agent_bridge.agents.availability import AgentAvailability
 from agent_bridge.application_paths import ApplicationPaths
 from agent_bridge.config import AppConfig
 from agent_bridge.manager.agent_debug_panel import AgentDebugPanel
@@ -42,7 +43,11 @@ from agent_bridge.manager.process_controller import (
     WorkbenchState,
     WorkbenchStatus,
 )
-from agent_bridge.manager.widgets import SessionBindingsEditor, StringListEditor
+from agent_bridge.manager.widgets import (
+    SessionBindingsEditor,
+    StringListEditor,
+    set_agent_choices,
+)
 
 
 def decode_workbench_log(data: bytes) -> str:
@@ -83,6 +88,7 @@ class AgentBridgeManagerWindow(QMainWindow):
         self._check_outcomes: list[CheckResult] = []
         self._checked_config: AppConfig | None = None
         self._saved_config: AppConfig | None = None
+        self._agent_states: dict[str, AgentAvailability] = {}
         self._check_started = 0.0
         self._start_after_checks = False
         self._initial_checks_pending = True
@@ -95,6 +101,8 @@ class AgentBridgeManagerWindow(QMainWindow):
         self._build_ui()
         self._apply_style()
         self._populate_form()
+        self.codex_enabled.toggled.connect(self._refresh_agent_choices)
+        self.claude_enabled.toggled.connect(self._refresh_agent_choices)
         self._refresh_yaml()
         self._apply_status(WorkbenchStatus(WorkbenchState.STOPPED))
 
@@ -757,6 +765,17 @@ class AgentBridgeManagerWindow(QMainWindow):
     def _populate_form(self) -> None:
         for path, _reader, writer in self._bindings:
             writer(self.document.value(path))
+        self._refresh_agent_choices()
+
+    def _refresh_agent_choices(self) -> None:
+        states = {
+            provider: self._agent_states.get(provider, AgentAvailability(False, "等待环境检查"))
+            if checkbox.isChecked() else AgentAvailability(False, "配置未启用")
+            for provider, checkbox in (("codex", self.codex_enabled), ("claude", self.claude_enabled))
+        }
+        set_agent_choices(self.default_provider, states)
+        self.session_bindings.set_agent_availability(states)
+        self.agent_debug.set_agent_availability(states)
 
     def _sync_form_to_document(self) -> None:
         for path, reader, _writer in self._bindings:
@@ -884,20 +903,25 @@ class AgentBridgeManagerWindow(QMainWindow):
         except Exception as error:  # noqa: BLE001 - UI worker boundary
             result = CheckResult(self._check_rows[index].name.text(), False, str(error))
         self._check_outcomes.append(result)
-        self._check_rows[index].set_state("success" if result.ok else "failed", result)
+        self._check_rows[index].set_state(
+            "success" if result.ok else "failed" if result.required else "unavailable", result)
         self.check_progress.setRange(0, len(self._check_session.tasks))
         self.check_progress.setValue(len(self._check_outcomes))
         self._submit_next_check()
 
     def _finish_checks(self) -> None:
-        failed = sum(not result.ok for result in self._check_outcomes)
-        passed = len(self._check_outcomes) - failed
+        failed = sum(not result.ok and result.required for result in self._check_outcomes)
+        optional = sum(not result.ok and not result.required for result in self._check_outcomes)
+        passed = sum(result.ok for result in self._check_outcomes)
+        self._agent_states = getattr(self._check_session, "agent_states", self._agent_states)
+        self._refresh_agent_choices()
         if passed and not failed:
             self._checked_config = getattr(self._check_session, "config", None)
         self._check_session = None
         start_after = self._start_after_checks
         self._start_after_checks = False
         self.check_summary.setText(f"检测完成：{passed} 项通过，{failed} 项失败。"
+                                   + (f"{optional} 个可选 Agent 不可用。" if optional else "")
                                    + ("请修复失败项后重新检查。" if failed else "环境已就绪。"))
         self.check_progress.setProperty("failed", bool(failed))
         self._repolish(self.check_progress)

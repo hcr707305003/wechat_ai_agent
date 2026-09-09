@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import os
@@ -360,6 +361,14 @@ class WeChatChannelAdapter(ChannelAdapter):
         self._nickname = ""
         self._resolved_private_ids = settings.allowed_private_ids
         self._resolved_group_ids = settings.allowed_group_ids
+        self._allowlist_log_labels: dict[tuple[ConversationType, str], tuple[str, ...]] = {
+            (kind, value): (value,)
+            for kind, values in (
+                (ConversationType.PRIVATE, settings.allowed_private_ids),
+                (ConversationType.GROUP, settings.allowed_group_ids),
+            )
+            for value in values
+        }
         self._resolved_session_bindings = settings.session_bindings
         self._display_name_cache: dict[str, str] = {}
         self._self_sender_ids: set[str] = {"2"}
@@ -1097,7 +1106,8 @@ class WeChatChannelAdapter(ChannelAdapter):
                 },
             )
         logger.info(
-            "收到微信消息: conversation=%s type=%s sender=%s message_id=%s",
+            "%s 收到微信消息: conversation=%s type=%s sender=%s message_id=%s",
+            self._configured_message_log_tag(message),
             message.conversation_id,
             message.conversation_type.value,
             message.sender_id,
@@ -1388,17 +1398,38 @@ class WeChatChannelAdapter(ChannelAdapter):
         session_ids: set[str],
     ) -> tuple[str, ...]:
         resolved: list[str] = []
+        labels: dict[str, list[str]] = {}
         for value in configured:
             username = self._resolve_conversation_username(
                 value, conversation_type, session_ids
             )
             if username not in resolved:
                 resolved.append(username)
+            originals = labels.setdefault(username, [])
+            if value not in originals:
+                originals.append(value)
             if username == value:
                 logger.info("微信白名单使用内部会话 ID: %s", value)
             else:
                 logger.info("微信白名单已解析: %s -> %s", value, username)
+        # Replace this type's mapping atomically; keep private/group names separate.
+        self._allowlist_log_labels = {
+            **{key: values for key, values in self._allowlist_log_labels.items()
+               if key[0] != conversation_type},
+            **{(conversation_type, username): tuple(values) for username, values in labels.items()},
+        }
         return tuple(resolved)
+
+    def _configured_message_log_tag(self, message: UnifiedMessage) -> str:
+        kind = "群聊" if message.conversation_type == ConversationType.GROUP else "私聊"
+        values = self._allowlist_log_labels.get(
+            (message.conversation_type, message.conversation_id), ()
+        )
+        if not values:
+            return f"[白名单{kind}: 原始配置项未知]"
+        # Quoted values retain Unicode but escape newlines/control characters.
+        label = "、".join(json.dumps(value, ensure_ascii=False) for value in values)
+        return f"[配置{kind}: {label}]"
 
     def _resolve_conversation_username(
         self,

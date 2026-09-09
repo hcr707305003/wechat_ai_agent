@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 from queue import Queue
 from threading import Event, Thread
 
+from agent_bridge.agents.availability import probe_agent
 from agent_bridge.agents.claude import ClaudeAdapter
 from agent_bridge.agents.codex import CodexAdapter
 from agent_bridge.config import AppConfig
@@ -33,6 +34,9 @@ def build_debug_adapter(config: AppConfig, provider: str):
     settings = config.agents.get(provider)
     if settings is None or not settings.enabled:
         raise ValueError(f"请先在参数配置中启用 {provider}。")
+    state = probe_agent(provider)
+    if not state.available:
+        raise ValueError(f"{provider} 不可用：{state.reason}")
     if provider == "codex":
         return CodexAdapter(settings.codex), CodexParser()
     if provider == "claude":

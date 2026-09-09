@@ -1,6 +1,6 @@
 runtime:
   database: data/bridge.db
-  default_provider: codex
+  default_provider: codex # 不可用时，新会话临时使用另一个可用 Agent；不修改已有 session
   default_working_directory: .
   allowed_roots:
     - .
@@ -10,7 +10,7 @@ runtime:
   max_reply_chars: 1800
   acknowledgement: 已接收，正在处理。
 
-agents:
+agents: # Codex / Claude 至少启用并安装一个即可；缺失项在管理面板中置灰禁选
   codex:
     enabled: true
     model: gpt-5.6-terra

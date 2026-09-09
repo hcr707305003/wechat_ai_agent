@@ -102,6 +102,65 @@ def test_decode_workbench_log_supports_mixed_utf8_and_legacy_chinese() -> None:
     assert decode_workbench_log(payload) == "UTF-8：工作台启动\n收到微信消息\n"
 
 
+@pytest.mark.parametrize("installed", [(), ("codex",), ("claude",), ("codex", "claude")])
+def test_agent_choices_disable_missing_provider_and_preserve_binding(qt_app, tmp_path, installed):
+    from agent_bridge.agents.availability import AgentAvailability
+
+    window = make_window(tmp_path)
+    try:
+        window.session_bindings.set_values([
+            {"conversation_id": "friend", "provider": "codex", "session_id": "old-native"}
+        ])
+        window._agent_states = {p: AgentAvailability(p in installed, "就绪" if p in installed else "缺失")
+                                for p in ("codex", "claude")}
+        window._refresh_agent_choices()
+        for combo in (window.default_provider, window.agent_debug.provider,
+                      window.session_bindings.table.cellWidget(0, 2)):
+            assert combo.model().item(0).isEnabled() == ("codex" in installed)
+            assert combo.model().item(1).isEnabled() == ("claude" in installed)
+        # Saved values must not silently change, especially native session bindings.
+        assert window.default_provider.currentText() == "codex"
+        assert window.session_bindings.values()[0]["provider"] == "codex"
+        assert window.session_bindings.values()[0]["session_id"] == "old-native"
+        assert window.agent_debug.send_button.isEnabled() == bool(installed)
+        assert window.agent_debug.probe_button.isEnabled() == bool(installed)
+        if installed:
+            assert window.agent_debug.provider.currentData() in installed
+        else:
+            assert window.agent_debug.provider.currentIndex() == -1
+        window.claude_enabled.setChecked(False)
+        assert not window.agent_debug.provider.model().item(1).isEnabled()
+    finally:
+        window.request_exit()
+
+
+def test_optional_agent_failure_does_not_block_start(qt_app, tmp_path, monkeypatch):
+    from agent_bridge.agents.availability import AgentAvailability
+
+    window = make_window(tmp_path)
+    try:
+        cfg = window.document.validate()
+        window._check_session = SimpleNamespace(config=cfg, agent_states={
+            "codex": AgentAvailability(False, "未安装"),
+            "claude": AgentAvailability(True, "就绪"),
+        })
+        window._check_outcomes = [
+            CheckResult("Codex Agent", False, "未安装", required=False),
+            CheckResult("Claude Agent", True, "就绪", required=False),
+            CheckResult("可用 Agent", True, "claude"),
+        ]
+        window._start_after_checks = True
+        calls = []
+        monkeypatch.setattr(window, "_submit_operation", lambda *args: calls.append(args))
+        window._finish_checks()
+        assert window._checked_config == cfg
+        assert len(calls) == 1
+        assert "0 项失败" in window.check_summary.text()
+        assert "1 个可选 Agent 不可用" in window.check_summary.text()
+    finally:
+        window.request_exit()
+
+
 def test_manager_window_displays_legacy_chinese_log(qt_app, tmp_path: Path) -> None:
     window = make_window(tmp_path)
     try:

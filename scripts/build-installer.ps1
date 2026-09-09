@@ -1,7 +1,7 @@
 param(
     [string]$Python = ".\.venv\Scripts\python.exe",
     [string]$InnoCompiler = "",
-    [string]$Version = "0.1.1",
+    [string]$Version = "0.1.2",
     [switch]$SkipTests
 )
 
@@ -28,11 +28,11 @@ function Remove-ProjectDirectory([string]$RelativePath) {
 if (-not $SkipTests) {
     & $pythonPath -m pytest tests\test_cli.py -q
     if ($LASTEXITCODE -ne 0) { throw 'CLI tests failed' }
-    & $pythonPath -m pytest --ignore=tests\test_cli.py --ignore=tests\test_companion_qt.py --ignore=tests\test_manager_qt.py --ignore=tests\test_manager_widgets.py --ignore=tests\test_manager_agent_debug.py -q
+    & $pythonPath -m pytest --ignore=tests\test_cli.py --ignore=tests\test_companion_qt.py --ignore=tests\test_manager_qt.py --ignore=tests\test_manager_widgets.py --ignore=tests\test_manager_agent_debug.py --ignore=tests\test_agent_choices_qt.py -q
     if ($LASTEXITCODE -ne 0) { throw 'Non-Qt tests failed' }
     & $pythonPath -m pytest tests\test_companion_qt.py -q
     if ($LASTEXITCODE -ne 0) { throw 'Workbench Qt tests failed' }
-    & $pythonPath -m pytest tests\test_manager_widgets.py tests\test_manager_qt.py tests\test_manager_agent_debug.py -q
+    & $pythonPath -m pytest tests\test_manager_widgets.py tests\test_manager_qt.py tests\test_manager_agent_debug.py tests\test_agent_choices_qt.py -q
     if ($LASTEXITCODE -ne 0) { throw 'Manager Qt tests failed' }
 }
 

@@ -58,6 +58,7 @@ class CheckIcon(QWidget):
             "running": "#15803D",
             "success": "#15803D",
             "failed": "#B91C1C",
+            "unavailable": "#94A3B8",
         }[self.state]
         painter.setPen(
             QPen(QColor(color), 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
@@ -73,6 +74,8 @@ class CheckIcon(QWidget):
             elif self.state == "failed":
                 painter.drawLine(QPointF(10, 10), QPointF(16, 16))
                 painter.drawLine(QPointF(16, 10), QPointF(10, 16))
+            elif self.state == "unavailable":
+                painter.drawLine(QPointF(9, 13), QPointF(17, 13))
             else:
                 painter.drawLine(QPointF(13, 8), QPointF(13, 13))
                 painter.drawLine(QPointF(13, 13), QPointF(16, 15))
@@ -118,6 +121,7 @@ class CheckRow(QFrame):
             "running": "正在检查…",
             "success": "通过",
             "failed": "失败",
+            "unavailable": "不可用（可选）",
         }
         self.status.setText(labels[state])
         color = {
@@ -125,6 +129,7 @@ class CheckRow(QFrame):
             "running": "#15803D",
             "success": "#15803D",
             "failed": "#B91C1C",
+            "unavailable": "#64748B",
         }[state]
         self.status.setStyleSheet(f"color: {color}; font-weight: 600;")
         self.icon.set_state(state)

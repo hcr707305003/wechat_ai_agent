@@ -91,6 +91,27 @@ def make_controller(repository: SQLiteRepository):
     return CompanionController(repository, dispatch, load_history, "codex"), history_calls
 
 
+def test_unavailable_agent_badge_is_grey_and_reply_controls_disabled(qt_app, tmp_path):
+    repository = SQLiteRepository(str(tmp_path / "availability.db"))
+    controller, _ = make_controller(repository)
+    controller.available_providers = ("claude",)
+    window = make_window(controller, [conversation()])
+    try:
+        window._render_selected()
+        assert not window.provider_badge.isEnabled()
+        assert "不可用" in window.provider_badge.toolTip()
+        assert not window.reply_switch.isEnabled()
+        assert not window.settings_reply_switch.isEnabled()
+        controller.default_provider = "claude"
+        window._render_selected()
+        assert window.provider_badge.isEnabled()
+        assert window.reply_switch.isEnabled()
+        assert window.provider_badge.styleSheet() == ""
+    finally:
+        window.close()
+        repository.close()
+
+
 def make_window(
     controller: CompanionController,
     conversations: list[ConversationItem],

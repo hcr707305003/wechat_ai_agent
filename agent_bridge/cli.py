@@ -257,16 +257,23 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def build_agent_factory(config: AppConfig) -> AgentFactory:
+    from agent_bridge.agents.availability import (
+        configured_availability,
+        effective_default,
+    )
+
+    states = configured_availability(config)
+    effective_default(config, states)  # Fail before opening databases or touching WeChat.
     factory = AgentFactory()
     codex_config = config.agents.get("codex")
-    if codex_config and codex_config.enabled:
+    if codex_config and states["codex"].available:
         factory.register(
             "codex",
             lambda: CodexAdapter(codex_config.codex),
             CodexParser,
         )
     claude_config = config.agents.get("claude")
-    if claude_config and claude_config.enabled:
+    if claude_config and states["claude"].available:
         factory.register(
             "claude",
             lambda: ClaudeAdapter(claude_config.claude),
@@ -281,17 +288,21 @@ async def run_bridge(
 ) -> None:
     if not config.wechat_enabled:
         raise RuntimeError("No enabled channel is configured")
+    factory = build_agent_factory(config)
+    default_provider = config.runtime.default_provider
+    if default_provider not in factory.providers():
+        default_provider = factory.providers()[0]
+        logger.warning("默认 Agent 不可用，新会话使用 %s；已有 session 不迁移。", default_provider)
     repository = SQLiteRepository(config.runtime.database)
     repository.interrupt_running_jobs()
     # Reply queues are process-local.  Do not let persistent outbound rows
     # resurrect stale replies after a service restart; conversation history
     # remains stored in the messages table.
     repository.discard_pending_outbound_deliveries()
-    factory = build_agent_factory(config)
     channel = WeChatChannelAdapter(config.wechat, repository)
     resolver = SessionResolver(
         repository,
-        config.runtime.default_provider,
+        default_provider,
         config.runtime.default_working_directory,
         config.runtime.allowed_roots,
     )
@@ -316,7 +327,7 @@ async def run_bridge(
         repository,
         dispatcher.handle,
         channel.load_history,
-        config.runtime.default_provider,
+        default_provider,
         channel.retry_delivery,
         channel.cancel_delivery,
         channel.resend_delivery,
@@ -326,6 +337,7 @@ async def run_bridge(
         dispatcher.remove_queued_job,
         dispatcher.clear_queued_jobs,
         dispatcher.observe,
+        available_providers=factory.providers(),
     )
     dispatcher.subscribe_progress(controller.handle_agent_update)
     channel.subscribe_sender(controller.handle_sender_update)
@@ -492,9 +504,13 @@ def doctor(config: AppConfig) -> int:
                     checks.append(("wechat_hook_quote", hook_ok, detail))
                 except WeChatHookError as error:
                     checks.append(("wechat_hook_quote", False, str(error)))
-    for provider, agent in config.agents.items():
-        if agent.enabled:
-            checks.append((f"dependency_{provider}", _module_exists(package_map[provider]), package_map[provider]))
+    from agent_bridge.agents.availability import configured_availability
+
+    states = configured_availability(config)
+    for provider, state in states.items():
+        print(f"[{'OK' if state.available else 'WARN'}] {provider}: {state.reason}")
+    checks.append(("agent_available", any(s.available for s in states.values()),
+                   "Codex 或 Claude 至少一个可用"))
     for name, ok, detail in checks:
         print(f"[{'OK' if ok else 'FAIL'}] {name}: {detail}")
     return 0 if all(ok for _, ok, _ in checks) else 1

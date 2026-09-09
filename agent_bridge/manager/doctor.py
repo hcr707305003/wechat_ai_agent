@@ -5,6 +5,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from agent_bridge.agents.availability import PROVIDERS, AgentAvailability, probe_agent
 from agent_bridge.config import AppConfig, load_config
 
 
@@ -14,6 +15,7 @@ class CheckResult:
     ok: bool
     detail: str
     suggestion: str = ""
+    required: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +55,7 @@ class ManagerCheckSession:
     def __init__(self, config_path: str | Path) -> None:
         self.config_path = Path(config_path)
         self.config: AppConfig | None = None
+        self.agent_states: dict[str, AgentAvailability] = {}
         self.tasks = [CheckTask("配置文件", self._load_configuration)]
 
     def _load_configuration(self) -> CheckResult:
@@ -92,11 +95,6 @@ class ManagerCheckSession:
             "PySide6": "PySide6",
             "qasync": "qasync",
         }
-        for provider, agent in config.agents.items():
-            if agent.enabled:
-                dependencies["Codex SDK" if provider == "codex" else "Claude SDK"] = (
-                    "openai_codex" if provider == "codex" else "claude_agent_sdk"
-                )
         for label, module in dependencies.items():
             remaining.append(
                 CheckTask(
@@ -104,6 +102,12 @@ class ManagerCheckSession:
                     lambda label=label, module=module: _dependency_check(label, module),
                 )
             )
+        for provider in PROVIDERS:
+            remaining.append(CheckTask(
+                f"{provider.title()} Agent",
+                lambda provider=provider: self._check_agent(provider),
+            ))
+        remaining.append(CheckTask("可用 Agent", self._check_any_agent))
         has_conversation = bool(
             config.wechat.allowed_private_ids or config.wechat.allowed_group_ids
         )
@@ -120,6 +124,24 @@ class ManagerCheckSession:
         )
         self.tasks.extend(remaining)
         return CheckResult("配置文件", True, str(self.config_path.resolve()))
+
+    def _check_agent(self, provider: str) -> CheckResult:
+        state = probe_agent(provider)
+        self.agent_states[provider] = state
+        agent = self.config.agents.get(provider)
+        enabled = agent is not None and agent.enabled
+        return CheckResult(
+            f"{provider.title()} Agent", state.available and enabled,
+            state.reason if enabled else "配置未启用",
+            required=False,
+        )
+
+    def _check_any_agent(self) -> CheckResult:
+        available = [p for p, s in self.agent_states.items()
+                     if s.available and p in self.config.agents and self.config.agents[p].enabled]
+        return CheckResult("可用 Agent", bool(available),
+                           "、".join(available) if available else "Codex 和 Claude 均不可用",
+                           "" if available else "请至少启用并安装其中一个 Agent。")
 
 
 def run_manager_checks(config_path: str | Path) -> list[CheckResult]:

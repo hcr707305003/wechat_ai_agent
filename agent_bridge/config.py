@@ -97,8 +97,8 @@ def load_config(path: str | Path) -> AppConfig:
             )
         else:
             raise ValueError(f"Unsupported configured agent provider: {provider}")
-    if runtime.default_provider not in agents or not agents[runtime.default_provider].enabled:
-        raise ValueError("runtime.default_provider must name an enabled agent")
+    if runtime.default_provider not in {"codex", "claude"}:
+        raise ValueError("runtime.default_provider must be codex or claude")
 
     channels_raw = _mapping(raw.get("channels", {}), "channels")
     wechat_raw = _mapping(channels_raw.get("wechat", {}), "channels.wechat")
@@ -148,13 +148,6 @@ def load_config(path: str | Path) -> AppConfig:
             **_known(companion_raw, WeChatCompanionSettings)
         ),
     )
-    for binding in wechat.session_bindings:
-        configured = agents.get(binding.provider)
-        if configured is None or not configured.enabled:
-            raise ValueError(
-                "channels.wechat.session_bindings references an unavailable "
-                f"agent: {binding.provider}"
-            )
     return AppConfig(runtime, agents, wechat, wechat_enabled)
 
 
@@ -219,6 +212,8 @@ def _session_bindings(value: Any) -> tuple[SessionBindingConfig, ...]:
             raise ValueError(
                 "Each session binding requires conversation_id, provider, and session_id"
             )
+        if provider not in {"codex", "claude"}:
+            raise ValueError(f"Unsupported session binding agent: {provider}")
         raw_type = entry.get("conversation_type")
         conversation_type: ConversationType | None = None
         if raw_type not in (None, ""):

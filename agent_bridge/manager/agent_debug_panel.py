@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from agent_bridge.manager.agent_debug import AgentDebugRunner, DebugEvent
+from agent_bridge.manager.widgets import set_agent_choices
 
 
 class AgentDebugPanel(QWidget):
@@ -37,6 +38,7 @@ class AgentDebugPanel(QWidget):
         self._started = 0.0
         self._reply_start = 0
         self._stop_requested = False
+        self._agent_states = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
@@ -116,6 +118,19 @@ class AgentDebugPanel(QWidget):
             widget.setEnabled(not busy)
         self.stop_button.setEnabled(busy)
         self.progress.setVisible(busy)
+        if not busy and self._agent_states is not None:
+            self.set_agent_availability(self._agent_states)
+
+    def set_agent_availability(self, states) -> None:
+        self._agent_states = states
+        if self._active:
+            return
+        set_agent_choices(self.provider, states, select_available=True)
+        available = self.provider.currentIndex() >= 0
+        self.send_button.setEnabled(available)
+        self.probe_button.setEnabled(available)
+        if not available:
+            self._set_status("没有可用 Agent，请启用并检查本地依赖。", "#B91C1C")
 
     def _probe(self) -> None:
         self._send_prompt(
@@ -130,6 +145,11 @@ class AgentDebugPanel(QWidget):
     def _send_prompt(self, prompt) -> bool:
         if self._active:
             return False
+        if self._agent_states is not None:
+            state = self._agent_states.get(self.provider.currentData())
+            if state is None or not state.available:
+                self._set_status("所选 Agent 不可用，请重新检查环境。", "#B91C1C")
+                return False
         try:
             loader = self._config_loader()
             if loader is None:

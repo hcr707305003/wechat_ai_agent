@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -10,11 +12,36 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QPushButton,
+    QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
+
+from agent_bridge.agents.availability import AgentAvailability
+
+
+def set_agent_choices(combo: QComboBox, states: dict[str, AgentAvailability], *,
+                      select_available: bool = False) -> None:
+    """Disable native items (mouse AND keyboard); preserve saved binding values."""
+    # The native Windows combo menu delegate ignores item foreground colors.
+    if not isinstance(combo.itemDelegate(), QStyledItemDelegate):
+        combo.setItemDelegate(QStyledItemDelegate(combo))
+    combo.view().setStyleSheet("QAbstractItemView::item:disabled { color: #94A3B8; }")
+    for index in range(combo.count()):
+        provider = combo.itemData(index) or combo.itemText(index).lower()
+        state = states.get(provider, AgentAvailability(False, "等待环境检查"))
+        item = combo.model().item(index)
+        item.setEnabled(state.available)
+        item.setData(None if state.available else QColor("#94A3B8"), Qt.ItemDataRole.ForegroundRole)
+        item.setToolTip(state.reason)
+    current = combo.model().item(combo.currentIndex())
+    if select_available and (current is None or not current.isEnabled()):
+        combo.setCurrentIndex(next((i for i in range(combo.count())
+                                   if combo.model().item(i).isEnabled()), -1))
+    current = combo.model().item(combo.currentIndex())
+    combo.setToolTip(current.toolTip() if current else "没有可用 Agent")
 
 
 class StringListEditor(QWidget):
@@ -84,6 +111,7 @@ class SessionBindingsEditor(QWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self._agent_states: dict[str, AgentAvailability] | None = None
         self.table = QTableWidget(0, len(self.HEADERS))
         self.table.setHorizontalHeaderLabels(self.HEADERS)
         self.table.horizontalHeader().setSectionResizeMode(
@@ -128,9 +156,16 @@ class SessionBindingsEditor(QWidget):
         provider = QComboBox()
         provider.addItems(["codex", "claude"])
         provider.setCurrentText(str(value.get("provider") or "codex"))
+        if self._agent_states is not None:
+            set_agent_choices(provider, self._agent_states, select_available=not value)
         self.table.setCellWidget(row, 2, provider)
         self.table.setItem(row, 3, QTableWidgetItem(str(value.get("session_id", ""))))
         self.table.setCurrentCell(row, 0)
+
+    def set_agent_availability(self, states: dict[str, AgentAvailability]) -> None:
+        self._agent_states = states
+        for row in range(self.table.rowCount()):
+            set_agent_choices(self.table.cellWidget(row, 2), states)
 
     def values(self) -> list[dict[str, str]]:
         result = []
