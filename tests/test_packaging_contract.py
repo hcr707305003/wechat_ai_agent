@@ -3,16 +3,23 @@ from pathlib import Path
 import pytest
 
 
-def test_readme_demo_asset_exists_and_is_not_ignored():
+@pytest.mark.parametrize(
+    "asset,signatures",
+    [
+        ("manager-demo.gif", (b"GIF87a", b"GIF89a")),
+        ("workbench-wechat-preview.png", (b"\x89PNG\r\n\x1a\n",)),
+    ],
+)
+def test_readme_demo_assets_exist_and_are_not_ignored(asset, signatures):
     import subprocess
 
     root = Path(__file__).resolve().parents[1]
-    assert "(assets/manager-demo.gif)" in (root / "README.md").read_text(encoding="utf-8")
-    with (root / "assets" / "manager-demo.gif").open("rb") as handle:
-        assert handle.read(6) in {b"GIF87a", b"GIF89a"}
+    assert f"(assets/{asset})" in (root / "README.md").read_text(encoding="utf-8")
+    with (root / "assets" / asset).open("rb") as handle:
+        assert handle.read(len(signatures[0])) in signatures
     if (root / ".git").exists():
         result = subprocess.run(
-            ["git", "check-ignore", "--no-index", "assets/manager-demo.gif"],
+            ["git", "check-ignore", "--no-index", f"assets/{asset}"],
             cwd=root, capture_output=True, check=False,
         )
         assert result.returncode == 1
