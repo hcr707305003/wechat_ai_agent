@@ -1,0 +1,92 @@
+runtime:
+  database: data/bridge.db
+  default_provider: codex
+  default_working_directory: .
+  allowed_roots:
+    - .
+  concurrency: 3
+  timeout_seconds: 600
+  recent_messages: 40
+  max_reply_chars: 1800
+  acknowledgement: 已接收，正在处理。
+
+agents:
+  codex:
+    enabled: true
+    model: gpt-5.6-terra
+    fallback_models:
+      - gpt-5.6-luna
+      - gpt-5.5
+    sandbox: workspace-write
+    approval_mode: deny_all
+    base_instructions: null
+  claude:
+    enabled: true
+    model: null
+    permission_mode: default
+    system_prompt: null
+    allow_bash: false
+    allow_network: false
+
+channels:
+  wechat:
+    enabled: true
+    account: null
+    allowed_private_ids:
+      - filehelper
+    allowed_group_ids:
+    group_controllers:
+    # AI 文本回复前缀；默认留空，截图、图片和内置提示不添加
+    reply_prefix: ""
+    # 私聊回复是否引用触发本次回复的原消息，默认关闭
+    quote_private_replies: false
+    # 群聊回复是否引用触发本次回复的原消息，默认关闭
+    quote_group_replies: false
+    # 同一会话连续文字和图片的合并等待时间（秒）；设为 0 可关闭等待
+    message_batch_window_seconds: 1.5
+    # 群聊触发词列表。默认仅匹配消息开头。
+    session_bindings: #多个私聊和群聊分别绑定不同的 Codex/Claude
+      # - conversation_id: example_friend
+      #   conversation_type: private
+      #   provider: codex
+      #   session_id: 00000000-0000-4000-8000-000000000001
+
+      # - conversation_id: example_group@chatroom
+      #   conversation_type: group
+      #   provider: claude
+      #   session_id: 550e8400-e29b-41d4-a716-446655440000
+    group_prefixes:
+      - /ai
+    # 匹配规则：prefix（前缀，默认）、contains（包含任意位置）、suffix（结尾）。
+    group_prefixes_rule: prefix
+    listener_interval: 0.25
+    # 实验性静默原生引用。Hook 未通过版本指纹和能力检查时不会启用。
+    hook_quote:
+      enabled: false
+      endpoint: http://127.0.0.1:30001
+      token_env: AGENT_BRIDGE_WECHAT_HOOK_TOKEN
+      timeout_seconds: 2.0
+      expected_version: 4.1.12.55
+    sender:
+      mode: idle_uia
+      idle_seconds: 1.5
+      max_queue_age_seconds: 600
+      # 最多发送尝试次数（包含首次发送），默认 3；可设为 1-20
+      max_attempts: 3
+      verify_sends: true
+      mouse_fallback: false
+      foreground_fallback_default: false
+      foreground_driver: wechat_mcp
+      # 前台自动化硬超时（秒）；超时会终止隔离进程
+      foreground_operation_timeout_seconds: 8
+      # 引用发送包含历史定位和菜单操作，使用更长的独立硬超时
+      foreground_quote_timeout_seconds: 30
+      # 超时后的前台自动化熔断时间（秒）
+      foreground_cooldown_seconds: 60
+    companion:
+      mode: docked
+      side: right
+      width: 440
+      height: 620
+      follow_interval: 0.016
+      theme: system

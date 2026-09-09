@@ -1,0 +1,11 @@
+{
+  "repository": "https://github.com/aixed/WeChat-Hook.git",
+  "commit": "0223630c5b9f1a1da26d70c0bd9361dd8781f01e",
+  "usage": [
+    "include/httplib.h",
+    "include/json.hpp"
+  ],
+  "installed_wechat_target": "4.1.12.55",
+  "notes": "No upstream version-specific send offsets are reused."
+}
+
