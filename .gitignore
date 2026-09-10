@@ -32,6 +32,7 @@ wechatauto_logs/
 *.log
 @AutomationLog.txt
 manager.lock
+.agent-bridge-*.json
 artifacts/
 .release/
 .ruff_cache/

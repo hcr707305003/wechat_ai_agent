@@ -14,8 +14,9 @@ from agent_bridge.channels.wechat import (
     WeChatCompanionSettings,
     WeChatSenderSettings,
 )
-from agent_bridge.senders.wechat_hook_driver import WeChatHookQuoteSettings
 from agent_bridge.models import ConversationType, SessionBindingConfig
+from agent_bridge.senders.wechat_hook_driver import WeChatHookQuoteSettings
+from agent_bridge.webhooks import parse_webhooks
 
 
 @dataclass(slots=True, frozen=True)
@@ -139,6 +140,7 @@ def load_config(path: str | Path) -> AppConfig:
             wechat_raw.get("message_batch_window_seconds", 1.5)
         ),
         session_bindings=_session_bindings(wechat_raw.get("session_bindings", [])),
+        webhooks=parse_webhooks(wechat_raw.get("webhooks", [])),
         listener_interval=float(wechat_raw.get("listener_interval", 0.25)),
         hook_quote=WeChatHookQuoteSettings(
             **_known(hook_quote_raw, WeChatHookQuoteSettings)

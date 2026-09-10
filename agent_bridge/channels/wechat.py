@@ -44,6 +44,7 @@ from agent_bridge.senders.wechat import (
 from agent_bridge.senders.wechat_hook_driver import WeChatHookQuoteSettings
 from agent_bridge.sessions.repository import SQLiteRepository
 from agent_bridge.tools.desktop import DesktopToolbox, WindowInfo
+from agent_bridge.webhooks import WebhookDispatcher, WebhookSettings
 
 logger = logging.getLogger(__name__)
 
@@ -306,6 +307,7 @@ class WeChatChannelSettings:
     message_batch_window_seconds: float = 1.5
     # Optional per-conversation agent session bindings loaded from YAML.
     session_bindings: tuple[SessionBindingConfig, ...] = ()
+    webhooks: tuple[WebhookSettings, ...] = ()
     # Keep message pickup responsive without making the WeChat DB poller busy.
     # This is the upper bound on delivery latency for an otherwise idle bridge.
     listener_interval: float = 0.25
@@ -342,6 +344,7 @@ class WeChatChannelAdapter(ChannelAdapter):
     ) -> None:
         self.settings = settings
         self.repository = repository
+        self._webhooks = WebhookDispatcher(settings.webhooks)
         self._handler: MessageHandler | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._db_lock = threading.RLock()
@@ -454,7 +457,12 @@ class WeChatChannelAdapter(ChannelAdapter):
         )
         assert self._listener is not None
         stage_started = time.perf_counter()
-        await asyncio.to_thread(self._listener.start)
+        self._webhooks.start()
+        try:
+            await asyncio.to_thread(self._listener.start)
+        except BaseException:
+            self._webhooks.stop()
+            raise
         logger.info(
             "微信通道启动计时: listener ready elapsed=%.3fs total=%.3fs",
             time.perf_counter() - stage_started,
@@ -553,6 +561,7 @@ class WeChatChannelAdapter(ChannelAdapter):
         return targets
 
     async def stop(self) -> None:
+        self._webhooks.stop()
         sender = self._sender
         if sender is not None:
             await sender.stop()
@@ -1080,6 +1089,8 @@ class WeChatChannelAdapter(ChannelAdapter):
                 "忽略白名单外微信消息: conversation=%s", message.conversation_id
             )
             return
+        webhook_message = message
+        webhook_is_self = message.metadata.get("is_self") is True
         pending_outbound = self._consume_pending_outbound(
             message.conversation_id, message.content, message.content_type
         )
@@ -1096,6 +1107,18 @@ class WeChatChannelAdapter(ChannelAdapter):
                 },
             )
         message = replace(message, sender_name=self._sender_display_name(message))
+        webhook_message = replace(webhook_message, sender_name=(
+            message.sender_name if not bridge_outbound or webhook_is_self
+            else self._sender_display_name(webhook_message)
+        ), metadata={
+            **webhook_message.metadata, "is_self": webhook_is_self,
+            "bridge_outbound": bridge_outbound and webhook_is_self,
+        })
+        try:
+            self._webhooks.submit(webhook_message, self._allowlist_log_labels.get(
+                (message.conversation_type, message.conversation_id), ()))
+        except Exception as error:  # noqa: BLE001 - webhooks must never break message reception
+            logger.warning("Webhook 消息入队失败: error=%s", type(error).__name__)
         message = self._prepare_for_controller(message)
         if message.metadata.get("is_self") and not bridge_outbound:
             message = replace(

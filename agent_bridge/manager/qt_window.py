@@ -43,6 +43,7 @@ from agent_bridge.manager.process_controller import (
     WorkbenchState,
     WorkbenchStatus,
 )
+from agent_bridge.manager.webhook_editor import WebhookEditor
 from agent_bridge.manager.widgets import (
     SessionBindingsEditor,
     StringListEditor,
@@ -408,6 +409,12 @@ class AgentBridgeManagerWindow(QMainWindow):
             )
         )
         content.addWidget(bindings_group)
+        webhook_group = QGroupBox("消息 Webhook 推送")
+        webhook_layout = QVBoxLayout(webhook_group)
+        self.webhooks = WebhookEditor()
+        webhook_layout.addWidget(self.webhooks)
+        self._bindings.append(("channels.wechat.webhooks", self.webhooks.values, self.webhooks.set_values))
+        content.addWidget(webhook_group)
         content.addStretch(1)
         return page
 

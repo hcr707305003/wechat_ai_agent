@@ -82,6 +82,68 @@ def test_manager_window_saves_form_changes(qt_app, tmp_path: Path) -> None:
         window.request_exit()
 
 
+def test_manager_webhook_editor_saves_independent_endpoints(qt_app, tmp_path):
+    window = make_window(tmp_path)
+    try:
+        editor = window.webhooks
+        assert editor.values() == []
+        editor.add_button.click()
+        editor.name.setText("私聊服务")
+        editor.url.setText("https://one.example/webhook")
+        editor.enabled.setChecked(True)
+        editor.method.setCurrentText("PATCH")
+        editor.headers.add_button.click()
+        editor.headers.table.cellWidget(0, 0).setText("Authorization")
+        editor.headers.table.cellWidget(0, 1).setText("Bearer TEST_TOKEN")
+        editor.conversation_type.setCurrentIndex(editor.conversation_type.findData("private"))
+        editor.add_button.click()
+        editor.name.setText("群本人")
+        editor.url.setText("https://two.example/webhook")
+        editor.enabled.setChecked(True)
+        editor.conversation_type.setCurrentIndex(editor.conversation_type.findData("group"))
+        editor.sender.setCurrentIndex(editor.sender.findData("self"))
+        editor.include_ai.setChecked(True)
+        editor.attempts.setValue(5)
+        editor.list.setCurrentRow(0)
+        assert editor.name.text() == "私聊服务"
+        assert editor.method.currentText() == "PATCH"
+        assert editor.headers.values() == {"Authorization": "Bearer TEST_TOKEN"}
+        assert editor.sender.currentData() == "others"
+        assert not editor.include_ai.isChecked()
+        assert not editor.error.text()
+        expected = editor.values()
+        assert window.save_config(show_success=False)
+        saved = ConfigDocument.load(window.paths.config_file)
+        assert saved.value("channels.wechat.webhooks") == expected
+        assert len(saved.validate().wechat.webhooks) == 2
+        assert saved.validate().wechat.webhooks[0].headers == {"Authorization": "Bearer TEST_TOKEN"}
+        assert saved.validate().wechat.webhooks[1].headers == {}
+        editor.remove_button.click()
+        assert editor.values() == expected[1:]
+        editor.remove_button.click()
+        assert editor.values() == []
+        assert not editor.form_widget.isEnabled()
+    finally:
+        window.request_exit()
+
+
+@pytest.mark.parametrize("value", ["invalid", [None], [{"timeout_seconds": "slow", "max_attempts": None}],
+                                       [{"enabled": True, "url": "invalid"}]])
+def test_webhook_invalid_yaml_is_preserved_without_crashing(qt_app, value):
+    from agent_bridge.manager.webhook_editor import WebhookEditor
+
+    editor = WebhookEditor()
+    try:
+        editor.set_values(value)
+        assert editor.values() == value
+        assert editor.error.text()
+        editor.set_values([])
+        assert not editor.error.text()
+        assert editor.add_button.isEnabled()
+    finally:
+        editor.close()
+
+
 def test_manager_window_advanced_yaml_preserves_unknown_field(
     qt_app, tmp_path: Path
 ) -> None:

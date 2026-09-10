@@ -18,6 +18,7 @@ def test_load_example_config() -> None:
         "gpt-5.5",
     )
     assert config.wechat.allowed_private_ids == ("filehelper",)
+    assert config.wechat.webhooks == ()
     assert config.wechat.group_prefixes == ("/ai",)
     assert config.wechat.group_prefixes_rule == "prefix"
     assert config.wechat.reply_prefix == ""

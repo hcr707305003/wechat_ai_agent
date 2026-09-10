@@ -36,6 +36,25 @@ channels:
       - filehelper
     allowed_group_ids:
     group_controllers:
+    # 每个地址单独筛选，所有条件同时满足才推送。默认空，不发送任何 webhook。
+    # “本人”指当前登录微信账号；AI/本程序回复属于本人，还需 include_ai_replies=true。
+    # POST JSON；仅实时白名单消息，不补历史，不上传图片文件，重启不恢复待推送队列。
+    # 正文仅含 source/event_id/content/sender/conversation_id/occurred_at 六个字段。
+    # 使用下方示例时将 webhooks: [] 改为 webhooks:，再取消示例注释。
+    webhooks: []
+      # - name: 私聊接收服务
+      #   url: https://your-server.example/webhook
+      #   enabled: true
+      #   method: POST              # POST / PUT / PATCH，固定发送 JSON
+      #   headers:                  # 自定义请求头，默认 {}
+      #     Authorization: "Bearer YOUR_TOKEN"
+      #     X-API-Key: "YOUR_API_KEY"
+      #   # 头值不进入推送日志；配置与 .bak 备份仍为明文，不要公开。
+      #   conversation_type: private # all / private / group
+      #   sender: others             # all / self / others
+      #   include_ai_replies: false
+      #   timeout_seconds: 5         # 1–60 秒
+      #   max_attempts: 3            # 1–10，含首次发送
     # AI 文本回复前缀；默认留空，截图、图片和内置提示不添加
     reply_prefix: ""
     # 私聊回复是否引用触发本次回复的原消息，默认关闭

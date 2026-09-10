@@ -219,6 +219,70 @@ Agent 任务开始执行: job=... session=... provider=...
 
 每个渠道会话只有一个逻辑 session。切换 Agent 时逻辑 session 不变；系统保留各 Provider 的原生句柄，并通过统一摘要和最近消息为新 Provider 构造上下文。
 
+## 消息 Webhook 推送
+
+管理面板的「微信与会话 → 消息 Webhook 推送」可添加、删除和编辑多个地址；也可以在 `config.yaml` 中配置。默认 `webhooks: []`，不向任何地址推送。保存配置后重启工作台生效。
+
+每个地址独立设置会话类型、消息来源和是否包含 AI 回复，**所有筛选条件同时满足**才会推送：
+
+```yaml
+channels:
+  wechat:
+    webhooks:
+      - name: 私聊接收服务
+        url: https://your-server.example/private-webhook
+        enabled: true
+        method: POST                # POST / PUT / PATCH，默认 POST
+        headers:                    # 默认 {}，每个地址独立配置
+          Authorization: "Bearer YOUR_TOKEN"
+          X-API-Key: "YOUR_API_KEY"
+        conversation_type: private  # all / private / group
+        sender: others             # all / self / others
+        include_ai_replies: false
+        timeout_seconds: 5         # 1–60 秒
+        max_attempts: 3            # 最多尝试次数，含首次；范围 1–10
+      - name: 群聊本人消息
+        url: https://your-server.example/group-webhook
+        enabled: true
+        conversation_type: group
+        sender: self
+        include_ai_replies: true
+        timeout_seconds: 5
+        max_attempts: 3
+```
+
+将 `webhooks` 合并进现有的 `channels.wechat`，不要重复创建同名 YAML 节点。
+
+- `self` 指当前登录微信账号，`others` 指其他发送者，不是“白名单内的联系人”。AI / 本程序回复也属于本人，因此 `sender: others` 时即使允许 AI 回复也不会推送 AI 回复。
+- 仅转发白名单内实时监听到的新消息；不受“开启回复”、群聊触发词或 Agent 是否运行影响。不转发加载的历史，不补发启动前消息。AI 回复通过微信回显及本程序待发送记录识别，不依赖回复前缀。
+- 图片、语音等在 `content` 中使用 `[image]`、`[voice]` 等类型占位文本；不发送附件字段、文件、图片二进制、原始媒体 XML、媒体密钥或本地附件路径。文本正文会发送给配置的服务，请仅配置可信地址。
+- 每个地址各有后台队列，顺序发送，互不等待。最多 32 个地址，每个队列最多 200 条，满时丢弃新消息并记录警告；单条 JSON 超过 1 MiB 不推送。
+- 默认使用 HTTP POST，可改为 PUT / PATCH，正文始终是 UTF-8 JSON。HTTP 2xx 表示服务端接受请求（例如 202 不代表后续业务处理已完成）。网络异常、408 / 425 / 429 / 5xx 按配置重试，默认最多尝试 3 次，退避等待 1、2 秒；其他错误状态不重试。不跟随重定向，不使用环境代理，HTTPS 验证证书。
+- 队列只保存在内存，停止或重启后未完成的队列不补发；已发出的网络请求无法撤回。重试可能造成重复投递，接收端应按 `event_id` 去重；这不是保证必达的消息队列。
+
+推送正文严格只含以下 6 个字段（微信 ID 和正文均为演示值），不附加其他字段：
+
+```json
+{
+  "source": "wechat",
+  "event_id": "稳定的消息标识，同一消息重试保持不变",
+  "sender": "wxid_demo_friend",
+  "conversation_id": "wxid_demo_friend",
+  "occurred_at": "2026-09-10T01:00:00+00:00",
+  "content": "你好"
+}
+```
+
+`source` 固定为 `wechat`，`sender` 使用原 `sender_id`，`occurred_at` 使用消息 `created_at`（带时区的 ISO 8601 时间），`event_id` 算法保持不变。筛选用的本人/AI/会话类型及白名单标签只用于程序内部，不进入正文。
+
+请求头默认包含 `Content-Type: application/json; charset=utf-8` 和 `X-Agent-Bridge-Event-Id`，后者与正文 `event_id` 一致。推送日志使用地址序号（如 `webhook=#1`）与事件 ID 标识，不打印 URL、正文、自定义头值或服务端响应内容。
+
+面板中可逐行添加、修改和删除自定义头，头值直接明文显示，切换地址后仍显示明文。`Authorization` 的值应填写完整的 `Bearer 令牌`（是否加 Bearer 以接收端要求为准），`X-API-Key` 填对应密钥。这里只做通用静态请求头，不计算动态签名；正文采用上述固定六字段结构。
+
+请求头名称不区分大小写，不允许重复、空名称或换行；值须为可打印 ASCII 字符串，YAML 中数字样式的密钥请加引号。最多 32 个自定义头，总大小 16 KiB。`Host`、`Content-Length`、`Transfer-Encoding`、连接控制头及事件 ID 等由程序管理，不能覆盖；`Content-Type` 只能设置为 JSON 媒体类型。配置也接受 `headers: [{name: Authorization, value: "Bearer YOUR_TOKEN"}]` 的列表写法。
+
+头值在面板中明文显示，也会明文保存到 `config.yaml`、其 `.bak` 备份，并在高级 YAML 中显示；推送日志不输出头值。不要上传或分享含密钥的截图或配置文件。
+
 ## 安全默认值
 
 - Codex 默认 `workspace-write` + `deny_all`，不允许升级为整机权限。
