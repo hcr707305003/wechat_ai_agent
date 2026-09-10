@@ -47,13 +47,66 @@ def wait_until(check, timeout=2):
 @pytest.mark.parametrize("conversation_filter", ["all", "private", "group"])
 @pytest.mark.parametrize("sender_filter", ["all", "self", "others"])
 @pytest.mark.parametrize("include_ai", [False, True])
-def test_independent_filters(kind, source, conversation_filter, sender_filter, include_ai):
-    hook = settings(conversation_type=conversation_filter, sender=sender_filter, include_ai_replies=include_ai)
+@pytest.mark.parametrize("content_type", [ContentType.TEXT, ContentType.IMAGE])
+def test_independent_filters(kind, source, conversation_filter, sender_filter, include_ai, content_type):
+    hook = settings(conversation_type=conversation_filter, sender=sender_filter,
+                    include_ai_replies=include_ai, content_types=["text"])
     expected = (conversation_filter in {"all", kind}
                 and sender_filter in {"all", "self" if source in {"self", "ai"} else "others"}
-                and (source != "ai" or include_ai))
-    assert hook.matches(msg(kind=kind, source=source)) is expected
-    assert not replace(hook, enabled=False).matches(msg(kind=kind, source=source))
+                and (source != "ai" or include_ai) and content_type == ContentType.TEXT)
+    message = msg(kind=kind, source=source, content_type=content_type)
+    assert hook.matches(message) is expected
+    assert not replace(hook, enabled=False).matches(message)
+
+
+@pytest.mark.parametrize("content_type", list(ContentType))
+@pytest.mark.parametrize("selected", [[], ["text"], ["text", "image"], ["unknown"]])
+def test_content_type_filters(content_type, selected):
+    assert settings(content_types=selected).matches(msg(content_type=content_type)) is (
+        not selected or content_type.value in selected
+    )
+    assert settings().matches(msg(content_type=content_type))
+
+
+@pytest.mark.parametrize("value", [None, "text", {}, True, 1, [None], [1], [{}], ["TEXT"], ["audio"]])
+def test_invalid_content_types(value):
+    with pytest.raises(ValueError, match="content_types"):
+        parse_webhooks([{"content_types": value}])
+
+
+def test_content_types_copied_and_deduplicated():
+    selected = ["text", "image", "text"]
+    hook = settings(content_types=selected)
+    selected.clear()
+    assert hook.content_types == ["text", "image"]
+    assert settings().content_types == []
+
+
+def test_dispatcher_filters_each_endpoint_before_sending():
+    queues = {name: Queue() for name in ("text", "media", "all")}
+
+    def post(endpoint, body, event_id):
+        payload = json.loads(body)
+        assert set(payload) == {"source", "event_id", "content", "sender", "conversation_id", "occurred_at"}
+        queues[endpoint.name].put(payload["content"])
+        return 204
+
+    dispatcher = WebhookDispatcher((settings(name="text", content_types=["text"]),
+                                    settings(name="media", content_types=["image", "voice"]),
+                                    settings(name="all")), post=post, retry_delay=0)
+    dispatcher.start()
+    try:
+        for kind in ContentType:
+            dispatcher.submit(msg(kind.value, content_type=kind), ())
+        # A literal media marker is still text, not an image.
+        dispatcher.submit(replace(msg("literal"), content="[image]"), ())
+        wait_until(lambda: queues["all"].qsize() == 7 and queues["text"].qsize() == 2
+                   and queues["media"].qsize() == 2)
+    finally:
+        dispatcher.stop()
+    assert [queues["text"].get_nowait() for _ in range(2)] == ["你好，原始内容", "[image]"]
+    assert [queues["media"].get_nowait() for _ in range(2)] == ["[image]", "[voice]"]
+    assert queues["text"].empty() and queues["media"].empty()
 
 
 @pytest.mark.parametrize("entry", [

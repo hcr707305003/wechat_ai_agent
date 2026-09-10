@@ -223,7 +223,7 @@ Agent 任务开始执行: job=... session=... provider=...
 
 管理面板的「微信与会话 → 消息 Webhook 推送」可添加、删除和编辑多个地址；也可以在 `config.yaml` 中配置。默认 `webhooks: []`，不向任何地址推送。保存配置后重启工作台生效。
 
-每个地址独立设置会话类型、消息来源和是否包含 AI 回复，**所有筛选条件同时满足**才会推送：
+每个地址独立设置会话类型、消息来源、消息类型和是否包含 AI 回复，**所有筛选条件同时满足**才会推送：
 
 ```yaml
 channels:
@@ -238,6 +238,7 @@ channels:
           X-API-Key: "YOUR_API_KEY"
         conversation_type: private  # all / private / group
         sender: others             # all / self / others
+        content_types: [text]      # 仅文本；默认 [] 表示全部类型
         include_ai_replies: false
         timeout_seconds: 5         # 1–60 秒
         max_attempts: 3            # 最多尝试次数，含首次；范围 1–10
@@ -246,6 +247,7 @@ channels:
         enabled: true
         conversation_type: group
         sender: self
+        content_types: [text, image] # 可多选：文本或图片
         include_ai_replies: true
         timeout_seconds: 5
         max_attempts: 3
@@ -253,6 +255,7 @@ channels:
 
 将 `webhooks` 合并进现有的 `channels.wechat`，不要重复创建同名 YAML 节点。
 
+- `content_types` 支持 `text`（文本）、`image`（图片）、`file`（文件）、`voice`（语音）、`video`（视频）、`unknown`（未知）。不配置或 `[]` 表示不按类型过滤；管理面板未勾选任何类型也表示全部。按程序识别的消息类型筛选，不按正文是否包含 `[image]` 等字样判断。过滤的消息不会进入该地址的发送和重试队列。
 - `self` 指当前登录微信账号，`others` 指其他发送者，不是“白名单内的联系人”。AI / 本程序回复也属于本人，因此 `sender: others` 时即使允许 AI 回复也不会推送 AI 回复。
 - 仅转发白名单内实时监听到的新消息；不受“开启回复”、群聊触发词或 Agent 是否运行影响。不转发加载的历史，不补发启动前消息。AI 回复通过微信回显及本程序待发送记录识别，不依赖回复前缀。
 - 图片、语音等在 `content` 中使用 `[image]`、`[voice]` 等类型占位文本；不发送附件字段、文件、图片二进制、原始媒体 XML、媒体密钥或本地附件路径。文本正文会发送给配置的服务，请仅配置可信地址。

@@ -1,7 +1,7 @@
 param(
     [string]$Python = ".\.venv\Scripts\python.exe",
     [string]$InnoCompiler = "",
-    [string]$Version = "0.1.3",
+    [string]$Version = "0.1.4",
     [switch]$SkipTests
 )
 

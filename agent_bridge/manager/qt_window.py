@@ -1081,7 +1081,9 @@ class AgentBridgeManagerWindow(QMainWindow):
         scrollbar = self.log_view.verticalScrollBar()
         # Qt may update the vertical range again after showing a horizontal
         # scrollbar. Retain tail-following across that deferred layout pass.
-        if self._log_follow_tail and not scrollbar.isSliderDown():
+        if (self._log_follow_tail and not scrollbar.isSliderDown()
+                and not self.log_view.textCursor().hasSelection()
+                and not QApplication.mouseButtons() & Qt.MouseButton.LeftButton):
             scrollbar.setValue(maximum)
 
     def _refresh_log(self) -> None:
@@ -1089,7 +1091,11 @@ class AgentBridgeManagerWindow(QMainWindow):
         # Keep the displayed snapshot intact while reading older lines, even
         # when the on-disk 128 KiB tail rolls forward. Resume at the next tick
         # only after the user returns to the bottom and releases the scrollbar.
-        if scrollbar.isSliderDown() or not self._log_follow_tail:
+        # Replacing the document mid-drag resets Qt's selection anchor. Keep
+        # the snapshot stable until copying/selection is finished as well.
+        if (scrollbar.isSliderDown() or not self._log_follow_tail
+                or self.log_view.textCursor().hasSelection()
+                or QApplication.mouseButtons() & Qt.MouseButton.LeftButton):
             return
         if not self.paths.workbench_log.exists():
             return

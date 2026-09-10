@@ -14,9 +14,11 @@ def test_multiple_webhooks_config_round_trip(tmp_path):
     document = ConfigDocument(tmp_path / "config.yaml", {})
     rows = [asdict(WebhookSettings(name="私聊", url="https://one.example/in", enabled=True,
                                   conversation_type="private", sender="others", method="PUT",
+                                  content_types=["text"],
                                   headers={"Authorization": "Bearer TEST_TOKEN"})),
             asdict(WebhookSettings(name="群本人", url="https://two.example/in", enabled=True,
                                   conversation_type="group", sender="self", include_ai_replies=True,
+                                  content_types=["text", "image"],
                                   max_attempts=5, timeout_seconds=9))]
     document.set_value("channels.wechat.webhooks", rows)
     config = document.save()

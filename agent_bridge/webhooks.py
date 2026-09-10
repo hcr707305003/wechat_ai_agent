@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 QUEUE_LIMIT = 200
 MAX_PAYLOAD_BYTES = 1024 * 1024
 HTTP_METHODS = ("POST", "PUT", "PATCH")
+CONTENT_TYPES = tuple(kind.value for kind in ContentType)
 _HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+\Z")
 _RESERVED_HEADERS = {
     "host", "content-length", "transfer-encoding", "connection", "keep-alive", "te",
@@ -66,6 +67,14 @@ def validated_headers(value: object) -> dict[str, str]:
     return result
 
 
+def validated_content_types(value: object) -> list[str]:
+    if not isinstance(value, list) or any(
+        not isinstance(kind, str) or kind not in CONTENT_TYPES for kind in value
+    ):
+        raise ValueError("Webhook content_types 必须是类型列表：text/image/file/voice/video/unknown；[] 表示全部")
+    return list(dict.fromkeys(value))
+
+
 @dataclass(frozen=True, slots=True)
 class WebhookSettings:
     name: str = "Webhook"
@@ -78,11 +87,13 @@ class WebhookSettings:
     max_attempts: int = 3
     method: str = "POST"
     headers: dict[str, str] = field(default_factory=dict, repr=False)
+    content_types: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not isinstance(self.method, str) or self.method not in HTTP_METHODS:
             raise ValueError("Webhook method 必须是 POST/PUT/PATCH")
         object.__setattr__(self, "headers", validated_headers(self.headers))
+        object.__setattr__(self, "content_types", validated_content_types(self.content_types))
         if not isinstance(self.name, str) or not self.name.strip() or len(self.name) > 80:
             raise ValueError("Webhook name 必须是 1–80 个字符")
         if type(self.enabled) is not bool or type(self.include_ai_replies) is not bool:
@@ -115,6 +126,7 @@ class WebhookSettings:
         is_ai = message.metadata.get("bridge_outbound") is True and is_self
         return (
             self.enabled
+            and (not self.content_types or message.content_type.value in self.content_types)
             and (self.conversation_type == "all" or self.conversation_type == message.conversation_type.value)
             and (self.sender == "all" or (self.sender == "self" and is_self)
                  or (self.sender == "others" and not is_self))

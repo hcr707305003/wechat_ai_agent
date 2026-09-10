@@ -52,6 +52,8 @@ channels:
       #   # 头值不进入推送日志；配置与 .bak 备份仍为明文，不要公开。
       #   conversation_type: private # all / private / group
       #   sender: others             # all / self / others
+      #   content_types: []          # 默认全部；[text] 仅文本，[text, image] 文本和图片
+      #   # 可选类型：text / image / file / voice / video / unknown
       #   include_ai_replies: false
       #   timeout_seconds: 5         # 1–60 秒
       #   max_attempts: 3            # 1–10，含首次发送

@@ -96,12 +96,16 @@ def test_manager_webhook_editor_saves_independent_endpoints(qt_app, tmp_path):
         editor.headers.table.cellWidget(0, 0).setText("Authorization")
         editor.headers.table.cellWidget(0, 1).setText("Bearer TEST_TOKEN")
         editor.conversation_type.setCurrentIndex(editor.conversation_type.findData("private"))
+        editor.content_types["text"].setChecked(True)
         editor.add_button.click()
+        assert not any(box.isChecked() for box in editor.content_types.values())
         editor.name.setText("群本人")
         editor.url.setText("https://two.example/webhook")
         editor.enabled.setChecked(True)
         editor.conversation_type.setCurrentIndex(editor.conversation_type.findData("group"))
         editor.sender.setCurrentIndex(editor.sender.findData("self"))
+        editor.content_types["image"].setChecked(True)
+        editor.content_types["voice"].setChecked(True)
         editor.include_ai.setChecked(True)
         editor.attempts.setValue(5)
         editor.list.setCurrentRow(0)
@@ -109,6 +113,7 @@ def test_manager_webhook_editor_saves_independent_endpoints(qt_app, tmp_path):
         assert editor.method.currentText() == "PATCH"
         assert editor.headers.values() == {"Authorization": "Bearer TEST_TOKEN"}
         assert editor.sender.currentData() == "others"
+        assert [kind for kind, box in editor.content_types.items() if box.isChecked()] == ["text"]
         assert not editor.include_ai.isChecked()
         assert not editor.error.text()
         expected = editor.values()
@@ -118,6 +123,10 @@ def test_manager_webhook_editor_saves_independent_endpoints(qt_app, tmp_path):
         assert len(saved.validate().wechat.webhooks) == 2
         assert saved.validate().wechat.webhooks[0].headers == {"Authorization": "Bearer TEST_TOKEN"}
         assert saved.validate().wechat.webhooks[1].headers == {}
+        assert saved.validate().wechat.webhooks[0].content_types == ["text"]
+        assert saved.validate().wechat.webhooks[1].content_types == ["image", "voice"]
+        editor.set_values(saved.value("channels.wechat.webhooks"))
+        assert editor.content_types["text"].isChecked()
         editor.remove_button.click()
         assert editor.values() == expected[1:]
         editor.remove_button.click()
@@ -140,6 +149,32 @@ def test_webhook_invalid_yaml_is_preserved_without_crashing(qt_app, value):
         editor.set_values([])
         assert not editor.error.text()
         assert editor.add_button.isEnabled()
+    finally:
+        editor.close()
+
+
+@pytest.mark.parametrize("value", [None, "text", ["invalid"], [1], {}])
+def test_webhook_invalid_types_survive_unrelated_edit(qt_app, value):
+    from agent_bridge.manager.webhook_editor import WebhookEditor
+
+    editor = WebhookEditor()
+    try:
+        editor.set_values([{"name": "broken", "content_types": value}, {"name": "legacy"}])
+        assert not editor.content_types_widget.isEnabled()
+        editor.name.setText("renamed")
+        assert editor.values()[0]["content_types"] == value
+        assert "content_types" in editor.error.text()
+        editor.list.setCurrentRow(1)
+        assert editor.content_types_widget.isEnabled()
+        assert not any(box.isChecked() for box in editor.content_types.values())
+        assert not editor.error.text()
+        editor.content_types["text"].setChecked(True)
+        assert editor.values()[1]["content_types"] == ["text"]
+        editor.content_types["text"].setChecked(False)
+        assert editor.values()[1]["content_types"] == []
+        editor.list.setCurrentRow(0)
+        assert not editor.content_types_widget.isEnabled()
+        assert editor.values()[0]["content_types"] == value
     finally:
         editor.close()
 
@@ -290,6 +325,71 @@ def test_log_pauses_while_reading_and_resumes_only_at_bottom(
         assert view.toPlainText().endswith("继续跟随新日志\n")
         assert vertical.value() == vertical.maximum()
     finally:
+        window.request_exit()
+
+
+@pytest.mark.parametrize("selection", ["partial", "all", "reverse"])
+@pytest.mark.parametrize("roll_tail", [False, True])
+def test_log_selection_survives_refresh(qt_app, tmp_path, selection, roll_tail):
+    from PySide6.QtGui import QTextCursor
+
+    window = make_window(tmp_path)
+    try:
+        window._log_timer.stop()
+        original = "收到微信消息：用于复制的日志\n第二行日志\n"
+        window.paths.workbench_log.write_text(original, encoding="utf-8")
+        window._refresh_log()
+        view = window.log_view
+        cursor = view.textCursor()
+        start, end = {"partial": (2, 12), "all": (0, len(original)), "reverse": (12, 2)}[selection]
+        cursor.setPosition(start)
+        cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+        view.setTextCursor(cursor)
+        expected = (cursor.anchor(), cursor.position(), cursor.selectedText())
+        view.verticalScrollBar().setValue(view.verticalScrollBar().maximum())
+        assert window._log_follow_tail
+        incoming = ("新日志 " + "x" * 200 + "\n") * (1000 if roll_tail else 1)
+        window.paths.workbench_log.write_text(original + incoming, encoding="utf-8")
+        for _ in range(3):
+            window._refresh_log()
+            qt_app.processEvents()
+            cursor = view.textCursor()
+            assert (cursor.anchor(), cursor.position(), cursor.selectedText()) == expected
+            assert view.toPlainText() == original
+        cursor.clearSelection()
+        view.setTextCursor(cursor)
+        view.verticalScrollBar().setValue(view.verticalScrollBar().maximum())
+        window._refresh_log()
+        assert view.toPlainText().endswith(incoming.splitlines()[-1] + "\n")
+        assert not view.textCursor().hasSelection()
+    finally:
+        window.request_exit()
+
+
+def test_log_does_not_replace_document_between_mouse_press_and_selection(qt_app, tmp_path):
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+
+    window = make_window(tmp_path)
+    view = window.log_view
+    try:
+        window._initial_checks_pending = False
+        window._log_timer.stop()
+        window.tabs.setCurrentWidget(view.parentWidget())
+        window.show()
+        qt_app.processEvents()
+        window.paths.workbench_log.write_text("旧日志\n", encoding="utf-8")
+        window._refresh_log()
+        QTest.mousePress(view.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(5, 5))
+        assert not view.textCursor().hasSelection()
+        window.paths.workbench_log.write_text("旧日志\n新日志\n", encoding="utf-8")
+        window._refresh_log()
+        assert view.toPlainText() == "旧日志\n"
+        QTest.mouseRelease(view.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(5, 5))
+        window._refresh_log()
+        assert view.toPlainText() == "旧日志\n新日志\n"
+    finally:
+        QTest.mouseRelease(view.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(5, 5))
         window.request_exit()
 
 

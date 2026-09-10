@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -21,7 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from agent_bridge.manager.header_editor import HeaderEditor
-from agent_bridge.webhooks import HTTP_METHODS, WebhookSettings
+from agent_bridge.webhooks import HTTP_METHODS, WebhookSettings, validated_content_types
 
 
 class WebhookEditor(QWidget):
@@ -73,6 +74,21 @@ class WebhookEditor(QWidget):
         self.sender = QComboBox()
         for text, value in (("仅其他人", "others"), ("仅本人", "self"), ("本人和其他人", "all")):
             self.sender.addItem(text, value)
+        self.content_types_widget = QWidget()
+        type_layout = QGridLayout(self.content_types_widget)
+        type_layout.setContentsMargins(0, 0, 0, 0)
+        self.content_types = {}
+        self._invalid_content_types = False
+        for index, (value, label) in enumerate((("text", "文本"), ("image", "图片"),
+                                               ("file", "文件"), ("voice", "语音"),
+                                               ("video", "视频"), ("unknown", "未知"))):
+            checkbox = QCheckBox(label)
+            checkbox.setAccessibleName(f"推送{label}消息")
+            self.content_types[value] = checkbox
+            type_layout.addWidget(checkbox, index // 3, index % 3)
+        self.content_types_hint = QLabel("可多选；不勾选表示全部类型。")
+        self.content_types_hint.setWordWrap(True)
+        type_layout.addWidget(self.content_types_hint, 2, 0, 1, 3)
         self.include_ai = QCheckBox("允许推送 AI / 本程序回复")
         self.timeout = QDoubleSpinBox()
         self.timeout.setRange(1, 60)
@@ -82,6 +98,7 @@ class WebhookEditor(QWidget):
         for label, widget in (("名称", self.name), ("推送 URL", self.url),
                               ("请求方式", self.method), ("自定义请求头", self.headers), ("状态", self.enabled),
                               ("会话类型", self.conversation_type), ("消息来源", self.sender),
+                              ("消息类型", self.content_types_widget),
                               ("AI 回复", self.include_ai), ("超时（秒）", self.timeout),
                               ("最多尝试（含首次）", self.attempts)):
             form.addRow(label, widget)
@@ -104,6 +121,8 @@ class WebhookEditor(QWidget):
         for field in (self.name, self.url):
             field.textChanged.connect(self._edited)
         for field in (self.enabled, self.include_ai):
+            field.toggled.connect(self._edited)
+        for field in self.content_types.values():
             field.toggled.connect(self._edited)
         for field in (self.conversation_type, self.sender, self.method):
             field.currentIndexChanged.connect(self._edited)
@@ -162,6 +181,19 @@ class WebhookEditor(QWidget):
             self.enabled.setChecked(item["enabled"] is True)
             self.conversation_type.setCurrentIndex(self.conversation_type.findData(item["conversation_type"]))
             self.sender.setCurrentIndex(self.sender.findData(item["sender"]))
+            try:
+                selected_types = validated_content_types(item["content_types"])
+                self._invalid_content_types = False
+            except ValueError:
+                selected_types = []
+                self._invalid_content_types = True
+            self.content_types_widget.setEnabled(not self._invalid_content_types)
+            self.content_types_hint.setText(
+                "类型配置无效，原值已保留；请在高级 YAML 中修正。"
+                if self._invalid_content_types else "可多选；不勾选表示全部类型。"
+            )
+            for kind, checkbox in self.content_types.items():
+                checkbox.setChecked(kind in selected_types)
             self.include_ai.setChecked(item["include_ai_replies"] is True)
             timeout = item["timeout_seconds"]
             self.timeout.setValue(timeout if type(timeout) in (int, float) and math.isfinite(timeout) else 5)
@@ -182,6 +214,10 @@ class WebhookEditor(QWidget):
             max_attempts=self.attempts.value(),
             method=self.method.currentText(), headers=self.headers.values(),
         )
+        if not self._invalid_content_types:
+            self._items[row]["content_types"] = [
+                kind for kind, checkbox in self.content_types.items() if checkbox.isChecked()
+            ]
         self.list.item(row).setText(self._label(row))
         self._validate(self._items[row])
 
