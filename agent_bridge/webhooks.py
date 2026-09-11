@@ -18,6 +18,13 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 from uuid import uuid4
 
 from agent_bridge.models import ContentType, UnifiedMessage
+from agent_bridge.webhook_uploads import (
+    MEDIA_MARKERS,
+    UploadError,
+    UploadSettings,
+    parse_upload,
+    upload_media,
+)
 
 logger = logging.getLogger(__name__)
 QUEUE_LIMIT = 200
@@ -32,7 +39,7 @@ _RESERVED_HEADERS = {
 }
 
 
-def validated_headers(value: object) -> dict[str, str]:
+def validated_headers(value: object, *, multipart: bool = False) -> dict[str, str]:
     # The editor can retain duplicate draft rows; never silently overwrite them.
     if isinstance(value, dict):
         rows = list(value.items())
@@ -53,6 +60,8 @@ def validated_headers(value: object) -> dict[str, str]:
             raise ValueError(f"Webhook 请求头 #{index} 名称重复（不区分大小写）")
         if lowered in _RESERVED_HEADERS:
             raise ValueError(f"Webhook 请求头 #{index} 属于程序管理的传输字段，不可自定义")
+        if multipart and lowered == "content-type":
+            raise ValueError("上传 Content-Type 由程序自动生成 multipart/form-data 边界，请勿自定义")
         if not isinstance(content, str) or any(not 32 <= ord(c) <= 126 for c in content):
             raise ValueError(f"Webhook 请求头 #{index} 值必须是无换行的可打印 ASCII 文本")
         if lowered == "content-type" and not re.fullmatch(
@@ -75,6 +84,22 @@ def validated_content_types(value: object) -> list[str]:
     return list(dict.fromkeys(value))
 
 
+def validated_url(value: object) -> None:
+    if not isinstance(value, str):
+        raise TypeError("URL 必须是字符串")
+    if not value:
+        return
+    try:
+        parsed = urlsplit(value)
+        valid = (parsed.scheme in {"http", "https"} and parsed.hostname
+                 and parsed.username is None and parsed.password is None and not parsed.fragment
+                 and not any(c.isspace() or ord(c) < 32 for c in value))
+        if not valid or parsed.port == 0:
+            raise ValueError
+    except ValueError:
+        raise ValueError("Webhook URL 必须是有效 HTTP/HTTPS 地址，不含用户密码或片段") from None
+
+
 @dataclass(frozen=True, slots=True)
 class WebhookSettings:
     name: str = "Webhook"
@@ -88,12 +113,17 @@ class WebhookSettings:
     method: str = "POST"
     headers: dict[str, str] = field(default_factory=dict, repr=False)
     content_types: list[str] = field(default_factory=list)
+    payload_format: str = "basic"
+    upload: UploadSettings = field(default_factory=UploadSettings)
 
     def __post_init__(self) -> None:
         if not isinstance(self.method, str) or self.method not in HTTP_METHODS:
             raise ValueError("Webhook method 必须是 POST/PUT/PATCH")
         object.__setattr__(self, "headers", validated_headers(self.headers))
         object.__setattr__(self, "content_types", validated_content_types(self.content_types))
+        object.__setattr__(self, "upload", parse_upload(self.upload))
+        if self.payload_format not in ("basic", "memory"):
+            raise ValueError("Webhook payload_format 必须是 basic/memory")
         if not isinstance(self.name, str) or not self.name.strip() or len(self.name) > 80:
             raise ValueError("Webhook name 必须是 1–80 个字符")
         if type(self.enabled) is not bool or type(self.include_ai_replies) is not bool:
@@ -109,17 +139,7 @@ class WebhookSettings:
             raise ValueError("Webhook max_attempts 必须是 1–10（含首次发送）")
         if not isinstance(self.url, str) or (self.enabled and not self.url):
             raise ValueError("Webhook 启用时必须填写 URL")
-        if self.url:
-            try:
-                parsed = urlsplit(self.url)
-                valid = (parsed.scheme in {"http", "https"} and parsed.hostname
-                         and parsed.username is None and parsed.password is None and not parsed.fragment
-                         and not any(c.isspace() or ord(c) < 32 for c in self.url))
-                port = parsed.port
-                if not valid or port == 0:
-                    raise ValueError
-            except ValueError:
-                raise ValueError("Webhook URL 必须是有效 HTTP/HTTPS 地址，不含用户密码或片段") from None
+        validated_url(self.url)
 
     def matches(self, message: UnifiedMessage) -> bool:
         is_self = message.metadata.get("is_self") is True
@@ -181,7 +201,8 @@ def message_payload(message: UnifiedMessage, labels: tuple[str, ...]) -> dict:
     event_id = hashlib.sha256(json.dumps(identity, ensure_ascii=False).encode()).hexdigest()
     if not message.message_id or message.message_id.endswith(":None"):
         event_id = uuid4().hex  # Missing row IDs must not collapse unrelated messages.
-    content = message.content if message.content_type == ContentType.TEXT else f"[{message.content_type.value}]"
+    kind = message.content_type.value
+    content = message.content if message.content_type == ContentType.TEXT else MEDIA_MARKERS.get(kind, f"[{kind}]")
     return {
         "source": "wechat",
         "event_id": event_id,
@@ -193,8 +214,9 @@ def message_payload(message: UnifiedMessage, labels: tuple[str, ...]) -> dict:
 
 
 class _EndpointWorker:
-    def __init__(self, index, settings, post, retry_delay):
+    def __init__(self, index, settings, post, retry_delay, upload):
         self.index, self.settings, self.post = index, settings, post
+        self.upload = upload
         self.retry_delay = retry_delay
         self.queue = Queue(maxsize=QUEUE_LIMIT)
         self.stopped = threading.Event()
@@ -224,7 +246,31 @@ class _EndpointWorker:
             item = self.queue.get()
             if item is None or self.stopped.is_set():
                 return
-            event_id, body = item
+            event_id, body, message = item
+            payload = json.loads(body)
+            if self.settings.payload_format == "memory":
+                payload.update(account_id=message.channel_account_id,
+                               conversation_type=message.conversation_type.value, content_type="text")
+            if self.settings.upload.url and message.content_type.value in MEDIA_MARKERS:
+                # Upload once, before webhook retries; never create another remote file
+                # just because the notification receiver returned a transient error.
+                try:
+                    logger.info("Webhook 媒体上传开始: webhook=#%s event=%s", self.index, event_id)
+                    file_id = self.upload(self.settings.upload, message, event_id, self.stopped)
+                    payload["content"] = file_id
+                    if self.settings.payload_format == "memory":
+                        payload["content_type"] = {"image": "image", "voice": "audio", "video": "video"}[
+                            message.content_type.value]
+                except Exception as error:  # noqa: BLE001 - endpoint failures must remain isolated
+                    reason = str(error) if isinstance(error, UploadError) else type(error).__name__
+                    logger.warning("Webhook 媒体上传失败，未推送: webhook=#%s event=%s reason=%s",
+                                   self.index, event_id, reason)
+                    continue
+                logger.info("Webhook 媒体上传成功: webhook=#%s event=%s", self.index, event_id)
+            body = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
+            if len(body) > MAX_PAYLOAD_BYTES:
+                logger.warning("Webhook 消息过大，未推送: event=%s", event_id)
+                continue
             for attempt in range(1, self.settings.max_attempts + 1):
                 if self.stopped.is_set():
                     return
@@ -247,8 +293,10 @@ class _EndpointWorker:
 
 
 class WebhookDispatcher:
-    def __init__(self, settings: tuple[WebhookSettings, ...], *, post=post_json, retry_delay=1.0):
+    def __init__(self, settings: tuple[WebhookSettings, ...], *, post=post_json, retry_delay=1.0,
+                 upload=upload_media):
         self.settings, self._post, self._retry_delay = settings, post, retry_delay
+        self._upload = upload
         self._lock = threading.Lock()
         self._workers: list[_EndpointWorker] = []
         self._seen: OrderedDict[str, None] = OrderedDict()
@@ -260,7 +308,7 @@ class WebhookDispatcher:
                 return
             self._started_at = datetime.now(timezone.utc).replace(microsecond=0)
             self._seen.clear()
-            self._workers = [_EndpointWorker(i, s, self._post, self._retry_delay)
+            self._workers = [_EndpointWorker(i, s, self._post, self._retry_delay, self._upload)
                              for i, s in enumerate(self.settings, 1) if s.enabled]
             for worker in self._workers:
                 worker.thread.start()
@@ -292,4 +340,4 @@ class WebhookDispatcher:
                 logger.warning("Webhook 消息过大，未推送: event=%s", event_id)
                 return
             for worker in targets:
-                worker.enqueue((event_id, body))
+                worker.enqueue((event_id, body, message))

@@ -258,12 +258,12 @@ channels:
 - `content_types` 支持 `text`（文本）、`image`（图片）、`file`（文件）、`voice`（语音）、`video`（视频）、`unknown`（未知）。不配置或 `[]` 表示不按类型过滤；管理面板未勾选任何类型也表示全部。按程序识别的消息类型筛选，不按正文是否包含 `[image]` 等字样判断。过滤的消息不会进入该地址的发送和重试队列。
 - `self` 指当前登录微信账号，`others` 指其他发送者，不是“白名单内的联系人”。AI / 本程序回复也属于本人，因此 `sender: others` 时即使允许 AI 回复也不会推送 AI 回复。
 - 仅转发白名单内实时监听到的新消息；不受“开启回复”、群聊触发词或 Agent 是否运行影响。不转发加载的历史，不补发启动前消息。AI 回复通过微信回显及本程序待发送记录识别，不依赖回复前缀。
-- 图片、语音等在 `content` 中使用 `[image]`、`[voice]` 等类型占位文本；不发送附件字段、文件、图片二进制、原始媒体 XML、媒体密钥或本地附件路径。文本正文会发送给配置的服务，请仅配置可信地址。
+- 未配置上传接口时，图片、语音、视频的 `content` 分别为 `[图片]`、`[语音]`、`[视频]`；配置并上传成功后 `content` 为该接口返回的文件 ID。Webhook JSON 不包含附件字段、二进制、Base64、原始媒体 XML、媒体密钥或本地路径。文本继续发送原正文，请仅配置可信地址。
 - 每个地址各有后台队列，顺序发送，互不等待。最多 32 个地址，每个队列最多 200 条，满时丢弃新消息并记录警告；单条 JSON 超过 1 MiB 不推送。
 - 默认使用 HTTP POST，可改为 PUT / PATCH，正文始终是 UTF-8 JSON。HTTP 2xx 表示服务端接受请求（例如 202 不代表后续业务处理已完成）。网络异常、408 / 425 / 429 / 5xx 按配置重试，默认最多尝试 3 次，退避等待 1、2 秒；其他错误状态不重试。不跟随重定向，不使用环境代理，HTTPS 验证证书。
 - 队列只保存在内存，停止或重启后未完成的队列不补发；已发出的网络请求无法撤回。重试可能造成重复投递，接收端应按 `event_id` 去重；这不是保证必达的消息队列。
 
-推送正文严格只含以下 6 个字段（微信 ID 和正文均为演示值），不附加其他字段：
+默认 `payload_format: basic` 的推送正文严格只含以下 6 个字段（微信 ID 和正文均为演示值）。记忆服务可单独选择下文的 `memory` 格式：
 
 ```json
 {
@@ -276,7 +276,7 @@ channels:
 }
 ```
 
-`source` 固定为 `wechat`，`sender` 使用原 `sender_id`，`occurred_at` 使用消息 `created_at`（带时区的 ISO 8601 时间），`event_id` 算法保持不变。筛选用的本人/AI/会话类型及白名单标签只用于程序内部，不进入正文。
+`source` 固定为 `wechat`，`sender` 使用原 `sender_id`，`occurred_at` 使用消息 `created_at`（带时区的 ISO 8601 时间），`event_id` 算法保持不变。本人/AI 标识及白名单标签不进入正文。
 
 请求头默认包含 `Content-Type: application/json; charset=utf-8` 和 `X-Agent-Bridge-Event-Id`，后者与正文 `event_id` 一致。推送日志使用地址序号（如 `webhook=#1`）与事件 ID 标识，不打印 URL、正文、自定义头值或服务端响应内容。
 
@@ -285,6 +285,63 @@ channels:
 请求头名称不区分大小写，不允许重复、空名称或换行；值须为可打印 ASCII 字符串，YAML 中数字样式的密钥请加引号。最多 32 个自定义头，总大小 16 KiB。`Host`、`Content-Length`、`Transfer-Encoding`、连接控制头及事件 ID 等由程序管理，不能覆盖；`Content-Type` 只能设置为 JSON 媒体类型。配置也接受 `headers: [{name: Authorization, value: "Bearer YOUR_TOKEN"}]` 的列表写法。
 
 头值在面板中明文显示，也会明文保存到 `config.yaml`、其 `.bak` 备份，并在高级 YAML 中显示；推送日志不输出头值。不要上传或分享含密钥的截图或配置文件。
+
+### 每个 Webhook 独立的媒体上传配置
+
+管理面板中选择一个 Webhook，在「媒体文件上传」区域设置；上传请求头与推送请求头互不继承，均为明文。以下配置放在对应 Webhook 项目下：
+
+```yaml
+upload:
+  url: ""                     # 留空，不上传；后续填写你的上传接口地址
+  method: POST                # 普通上传：multipart/form-data，支持 POST/PUT/PATCH
+  headers: {}                  # 例如 Authorization: "Bearer YOUR_UPLOAD_TOKEN"
+  file_field: file             # 文件表单字段名称
+  file_id_path: data->file_id   # 上传响应中的文件 ID 路径
+  chunk_threshold_mb: 10       # <= 阈值：普通上传；> 阈值：分片接入点（MiB）
+  chunk_size_mb: 5             # 分片适配器的块大小（MiB）
+  max_file_mb: 100             # 超过此上限不上传
+  timeout_seconds: 30          # HTTP 超时，1–120 秒
+```
+
+| 上传响应 | `file_id_path` | 得到的文件 ID |
+| --- | --- | --- |
+| `{"field":"app_id"}` | `field` | `app_id` |
+| `{"data":{"field":"app_id"}}` | `data->field` | `app_id` |
+| `{"data":[{"field":"app_id"}]}` | `data[0]->field` | `app_id` |
+
+数组下标从 0 开始；字段不存在、下标越界、空值、对象或数组都视为提取失败，不会把整段 JSON 当作文件 ID。媒体 `content` 是提取出的 ID 字符串。文字消息不经过上传接口。
+
+普通上传以流式方式读取本地文件，自动生成 multipart 边界和文件类型；不要在上传请求头中手填 `Content-Type`。上传响应上限 64 KiB，不跟随重定向，也不使用环境代理。上传失败只记录安全错误，不发送伪造 ID 或悄悄改为占位；同一地址后续消息、其他 Webhook 仍可处理。上传暂只尝试一次（避免未知幂等协议导致重复文件）；Webhook 通知本身仍按 `max_attempts` 重试，重试时复用文件 ID。
+
+**通用协议范围：** `protocol: multipart` 支持普通 multipart 上传；没有通用分片协议，超出阈值时明确报错，不整文件兜底。使用以下专用协议才能调用 Evolutionary 的原始文件和分片接口。
+
+#### Evolutionary AI 文件与记忆接口
+
+在对应 Webhook 项目下设置（地址及令牌替换为自己的值）：
+
+```yaml
+payload_format: memory
+upload:
+  protocol: evolutionary
+  url: http://your-server:8000/v1/files
+  chunk_url: http://your-server:8000/v1/uploads
+  method: POST
+  headers:
+    Authorization: "Bearer YOUR_UPLOAD_TOKEN"
+  file_id_path: file_id
+  chunk_threshold_mb: 10
+  chunk_size_mb: 4
+  max_file_mb: 100
+  timeout_seconds: 30
+```
+
+- 小文件：`POST /v1/files` 原始二进制；查询参数包含种类、匿名文件名、大小、SHA-256 及完整会话范围。
+- 大文件：`POST /v1/uploads` 初始化，取顶层 `id`；从 0 开始 `PUT /v1/uploads/{id}/parts/{index}`；校验每片响应后 `POST /v1/uploads/{id}/complete`，提取顶层 `file_id`。分片大小以 MiB 配置，传给服务端时换算为字节。
+- 以 64 KiB 块读取文件，不将整个文件或整个分片载入内存。上传与合并后验证大小、状态和 SHA-256；上传期间文件变动、校验失败、取消、HTTP 错误都会停止，不继续通知。分片失败不会重新初始化或自动续传；服务器可能保留未完成会话，需通过服务端管理清理。
+- `memory` 格式在六字段基础上增加 `account_id`、`conversation_type` 和 `content_type`。文字为 `text`；已上传图片、语音、视频分别为 `image`、`audio`、`video`，`content` 是文件 ID。未配置上传时中文占位按 `text` 发送，避免把占位当作文件 ID。上传范围与通知中的账号、会话保持一致。
+- 管理面板可选择「上传协议」和「正文格式」，分别影响文件传输与消息 JSON；其他通用 Webhook 不会被自动切换。HTTP 鉴权头仍按各端点独立配置。已用生成的测试 PNG 验证真实接口的普通上传、分片合并及下载哈希，不涉及真实聊天或记忆写入。
+
+图片复用工作台已解密的本地缓存。上传器支持已经准备好的 MP3/WAV 和 MP4 附件，但微信语音/视频获取与转码链路、解码器随安装包分发尚未完成；原始 SILK 不会直接上传冒充可播放音频。本次不依赖外部存储服务，也不新增 Base64 推送。
 
 ## 安全默认值
 

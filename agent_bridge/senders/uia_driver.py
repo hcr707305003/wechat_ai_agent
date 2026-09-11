@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import ctypes
+import logging
 import time
 from collections.abc import Callable, Iterable
 from ctypes import wintypes
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 class SilentUiaUnavailable(RuntimeError):
@@ -72,6 +75,9 @@ class SilentWeChatUiaDriver:
             window_message_sender or send_enter_to_window
         )
         self._foreground_getter = foreground_getter or self._get_foreground_window
+        self._pinned_main_handle: int | None = None
+        self._pinned_main_identity: tuple[int, str] | None = None
+        self._window_identity_reader = self._native_window_identity
 
     @staticmethod
     def _default_uia_factory():
@@ -148,14 +154,81 @@ class SilentWeChatUiaDriver:
 
     def main_window_handle(self) -> int | None:
         try:
+            # Image viewers can share the main window's title/native Qt class.
+            # Keep a confirmed main HWND instead of selecting the largest shell.
+            if self._pinned_main_handle is not None:
+                identity = self._window_identity_reader(self._pinned_main_handle)
+                if identity is not None and identity == self._pinned_main_identity:
+                    return self._pinned_main_handle
+            self._pinned_main_handle = None
+            self._pinned_main_identity = None
             uia = self._uia_factory()
-            win = uia._find_main()
-            if win is not None:
-                return int(win.NativeWindowHandle)
-            handles = uia._wechat_hwnds()
-            return int(handles[0]) if handles else None
+            handle = 0
+            source = "UIA"
+            try:
+                win = uia._find_main()
+                if win is not None:
+                    handle = int(win.NativeWindowHandle or 0)
+            except Exception as error:  # noqa: BLE001 - third-party UIA failure must permit native discovery
+                logger.debug("微信跟随 UIA 识别不可用: %s", type(error).__name__)
+            if not handle:
+                # Cold-start WeChat may expose only native Qt/render windows.
+                # _wechat_hwnds verifies the owning Weixin process, but its area
+                # ordering is NOT a reliable indication of window purpose.
+                matches = [h for h in uia._wechat_hwnds() if self._is_native_main_shell(h)]
+                if len(matches) == 1:
+                    handle = int(matches[0])
+                    source = "native"
+            identity = self._window_identity_reader(handle) if handle else None
+            if identity is not None:
+                self._pinned_main_handle = handle
+                self._pinned_main_identity = identity
+                logger.info("微信跟随已绑定主窗口: hwnd=%s source=%s", handle, source)
+                return handle
+            return None
         except Exception:
             return None
+
+    @staticmethod
+    def _is_native_main_shell(handle: int) -> bool:
+        import win32con
+        import win32gui
+
+        try:
+            native_class = win32gui.GetClassName(handle)
+            if not (native_class.startswith("Qt") and native_class.endswith("QWindowIcon")):
+                return False
+            style = win32gui.GetWindowLong(handle, win32con.GWL_STYLE)
+            frame = (win32con.WS_CAPTION | win32con.WS_THICKFRAME
+                     | win32con.WS_MINIMIZEBOX | win32con.WS_MAXIMIZEBOX)
+            # WeChat 4.x main shell uses custom caption controls (no system
+            # menu). Preview/browser shells must not qualify just by title/size.
+            if style & frame != frame or style & (win32con.WS_CHILD | win32con.WS_SYSMENU):
+                return False
+            if win32gui.GetWindow(handle, win32con.GW_OWNER):
+                return False
+            if win32gui.GetWindowLong(handle, win32con.GWL_EXSTYLE) & win32con.WS_EX_TOOLWINDOW:
+                return False
+            render_children = []
+            win32gui.EnumChildWindows(
+                handle,
+                lambda child, _: render_children.append(child)
+                if win32gui.GetClassName(child).startswith("MMUIRenderSubWindow") else None,
+                None,
+            )
+            return bool(render_children)
+        except (OSError, win32gui.error):
+            return False
+
+    @staticmethod
+    def _native_window_identity(handle: int) -> tuple[int, str] | None:
+        import win32gui
+        import win32process
+
+        if not win32gui.IsWindow(handle):
+            return None
+        _thread_id, process_id = win32process.GetWindowThreadProcessId(handle)
+        return (process_id, win32gui.GetClassName(handle)) if process_id else None
 
     def current_draft(self, targets: Iterable[str]) -> str | None:
         names = tuple(dict.fromkeys(name.strip() for name in targets if name.strip()))

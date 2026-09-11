@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFormLayout,
     QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -22,6 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from agent_bridge.manager.header_editor import HeaderEditor
+from agent_bridge.manager.upload_editor import UploadEditor
 from agent_bridge.webhooks import HTTP_METHODS, WebhookSettings, validated_content_types
 
 
@@ -67,6 +69,9 @@ class WebhookEditor(QWidget):
         self.method = QComboBox()
         self.method.addItems(HTTP_METHODS)
         self.headers = HeaderEditor()
+        self.payload_format = QComboBox()
+        self.payload_format.addItem("通用六字段 JSON", "basic")
+        self.payload_format.addItem("记忆服务（含账号 / 会话 / 媒体类型）", "memory")
         self.enabled = QCheckBox("启用此地址")
         self.conversation_type = QComboBox()
         for text, value in (("私聊和群聊", "all"), ("仅私聊", "private"), ("仅群聊", "group")):
@@ -96,14 +101,20 @@ class WebhookEditor(QWidget):
         self.attempts = QSpinBox()
         self.attempts.setRange(1, 10)
         for label, widget in (("名称", self.name), ("推送 URL", self.url),
-                              ("请求方式", self.method), ("自定义请求头", self.headers), ("状态", self.enabled),
+                              ("请求方式", self.method), ("正文格式", self.payload_format),
+                              ("自定义请求头", self.headers), ("状态", self.enabled),
                               ("会话类型", self.conversation_type), ("消息来源", self.sender),
                               ("消息类型", self.content_types_widget),
                               ("AI 回复", self.include_ai), ("超时（秒）", self.timeout),
                               ("最多尝试（含首次）", self.attempts)):
             form.addRow(label, widget)
+        self.upload = UploadEditor()
+        upload_group = QGroupBox("媒体文件上传 · 当前 Webhook 独立配置")
+        QVBoxLayout(upload_group).addWidget(self.upload)
+        form.addRow(upload_group)
         note = QLabel("本人 = 当前登录微信账号。AI 回复也属于本人；“仅其他人”不会推送 AI 回复。\n"
-                      "固定发送 JSON；图片仅提供类型信息，不上传文件。不补历史，重启不补发旧队列。\n"
+                      "文字传正文，媒体上传成功后 content 传文件 ID；记忆格式增加账号、会话与媒体类型。\n"
+                      "未配置上传 URL 时传中文占位。不补历史，重启不补发旧队列。\n"
                       "头值与配置文件/备份均为明文，请勿分享含密钥的截图或配置。")
         note.setWordWrap(True)
         note.setObjectName("mutedText")
@@ -124,9 +135,10 @@ class WebhookEditor(QWidget):
             field.toggled.connect(self._edited)
         for field in self.content_types.values():
             field.toggled.connect(self._edited)
-        for field in (self.conversation_type, self.sender, self.method):
+        for field in (self.conversation_type, self.sender, self.method, self.payload_format):
             field.currentIndexChanged.connect(self._edited)
         self.headers.changed.connect(self._edited)
+        self.upload.changed.connect(self._edited)
         self.timeout.valueChanged.connect(self._edited)
         self.attempts.valueChanged.connect(self._edited)
         self._select(-1)
@@ -177,7 +189,9 @@ class WebhookEditor(QWidget):
             self.name.setText(str(item["name"]))
             self.url.setText(str(item["url"]))
             self.method.setCurrentIndex(self.method.findText(str(item["method"])))
+            self.payload_format.setCurrentIndex(self.payload_format.findData(item["payload_format"]))
             self.headers.set_values(item["headers"])
+            self.upload.set_values(item["upload"])
             self.enabled.setChecked(item["enabled"] is True)
             self.conversation_type.setCurrentIndex(self.conversation_type.findData(item["conversation_type"]))
             self.sender.setCurrentIndex(self.sender.findData(item["sender"]))
@@ -213,6 +227,8 @@ class WebhookEditor(QWidget):
             include_ai_replies=self.include_ai.isChecked(), timeout_seconds=self.timeout.value(),
             max_attempts=self.attempts.value(),
             method=self.method.currentText(), headers=self.headers.values(),
+            upload=self.upload.values(),
+            payload_format=self.payload_format.currentData(),
         )
         if not self._invalid_content_types:
             self._items[row]["content_types"] = [

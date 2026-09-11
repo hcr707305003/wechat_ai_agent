@@ -10,11 +10,45 @@ from agent_bridge.models import ConversationType, UnifiedMessage
 from agent_bridge.webhooks import WebhookSettings
 
 
+@pytest.mark.asyncio
+async def test_upload_receives_hydrated_image_and_original_identity(monkeypatch, tmp_path):
+    from agent_bridge.models import Attachment, ContentType
+
+    adapter = WeChatChannelAdapter(WeChatChannelSettings(
+        allowed_group_ids=("room@chatroom",), group_prefixes=("/ai",),
+        webhooks=(WebhookSettings(enabled=True, url="https://example.com/hook",
+                                  upload={"url": "https://example.com/upload"}),)), repository=object())
+    incoming = UnifiedMessage(channel="wechat", channel_account_id="bot", conversation_id="room@chatroom",
+                              conversation_type=ConversationType.GROUP, sender_id="friend", message_id="room:1",
+                              content="/ai original", content_type=ContentType.IMAGE,
+                              metadata={"is_self": False})
+    attachment = Attachment("image", path=str(tmp_path / "image.png"))
+    captured, hydrated, handled = [], [], asyncio.Event()
+    adapter._webhooks = SimpleNamespace(submit=lambda m, labels: captured.append(m))
+    monkeypatch.setattr(adapter, "normalize", lambda raw: incoming)
+    monkeypatch.setattr(adapter, "_sender_display_name", lambda m: "friend")
+    def hydrate(message, raw):
+        hydrated.append(raw)
+        return replace(message, attachments=(attachment,))
+    monkeypatch.setattr(adapter, "_hydrate_media_attachment", hydrate)
+    async def handler(message):
+        handled.set()
+    adapter._handler, adapter._loop = handler, asyncio.get_running_loop()
+    adapter._on_raw_message({"local_id": 1}, None)
+    await asyncio.wait_for(handled.wait(), 2)
+    assert len(hydrated) == len(captured) == 1
+    assert captured[0].attachments == (attachment,)
+    assert captured[0].content == "/ai original"
+    assert captured[0].sender_id == "friend"
+
+
 def test_multiple_webhooks_config_round_trip(tmp_path):
     document = ConfigDocument(tmp_path / "config.yaml", {})
     rows = [asdict(WebhookSettings(name="私聊", url="https://one.example/in", enabled=True,
                                   conversation_type="private", sender="others", method="PUT",
                                   content_types=["text"],
+                                  upload={"url": "https://one.example/upload", "file_id_path": "data[0]->field",
+                                          "headers": {"X-Upload-Key": "TEST_UPLOAD_TOKEN"}},
                                   headers={"Authorization": "Bearer TEST_TOKEN"})),
             asdict(WebhookSettings(name="群本人", url="https://two.example/in", enabled=True,
                                   conversation_type="group", sender="self", include_ai_replies=True,

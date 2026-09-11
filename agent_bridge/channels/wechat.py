@@ -1114,11 +1114,11 @@ class WeChatChannelAdapter(ChannelAdapter):
             **webhook_message.metadata, "is_self": webhook_is_self,
             "bridge_outbound": bridge_outbound and webhook_is_self,
         })
-        try:
-            self._webhooks.submit(webhook_message, self._allowlist_log_labels.get(
-                (message.conversation_type, message.conversation_id), ()))
-        except Exception as error:  # noqa: BLE001 - webhooks must never break message reception
-            logger.warning("Webhook 消息入队失败: error=%s", type(error).__name__)
+        needs_upload_media = (message.content_type == ContentType.IMAGE and any(
+            hook.upload.url and hook.matches(webhook_message) for hook in self.settings.webhooks
+        ))
+        if not needs_upload_media:
+            self._submit_webhook_message(webhook_message)
         message = self._prepare_for_controller(message)
         if message.metadata.get("is_self") and not bridge_outbound:
             message = replace(
@@ -1142,13 +1142,22 @@ class WeChatChannelAdapter(ChannelAdapter):
 
         async def dispatch_message() -> None:
             try:
-                await self._dispatch_message_in_order(message, raw_event)
+                await self._dispatch_message_in_order(
+                    message, raw_event, webhook_message=webhook_message if needs_upload_media else None
+                )
             finally:
                 if media_pending:
                     self._change_pending_media(message.conversation_id, -1)
 
         future = asyncio.run_coroutine_threadsafe(dispatch_message(), self._loop)
         future.add_done_callback(self._log_handler_failure)
+
+    def _submit_webhook_message(self, message: UnifiedMessage) -> None:
+        try:
+            self._webhooks.submit(message, self._allowlist_log_labels.get(
+                (message.conversation_type, message.conversation_id), ()))
+        except Exception as error:  # noqa: BLE001 - webhooks must never break reception
+            logger.warning("Webhook 消息入队失败: error=%s", type(error).__name__)
 
     def _change_pending_media(self, conversation_id: str, delta: int) -> None:
         with self._pending_media_lock:
@@ -1168,7 +1177,8 @@ class WeChatChannelAdapter(ChannelAdapter):
             await asyncio.sleep(0.05)
 
     async def _dispatch_message_in_order(
-        self, message: UnifiedMessage, raw_event: dict[str, Any]
+        self, message: UnifiedMessage, raw_event: dict[str, Any], *,
+        webhook_message: UnifiedMessage | None = None,
     ) -> None:
         """Hydrate and dispatch one conversation without reordering its messages."""
         if self._handler is None:
@@ -1185,6 +1195,10 @@ class WeChatChannelAdapter(ChannelAdapter):
                 hydrated = await asyncio.to_thread(
                     self._hydrate_media_attachment, message, raw_event
                 )
+            if webhook_message is not None:
+                # Reuse the already decrypted image; keep the original sender and
+                # untrimmed content, rather than controller/Agent trigger mutations.
+                self._submit_webhook_message(replace(webhook_message, attachments=hydrated.attachments))
             await self._handler(hydrated)
 
     @staticmethod

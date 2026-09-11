@@ -105,7 +105,7 @@ def test_dispatcher_filters_each_endpoint_before_sending():
     finally:
         dispatcher.stop()
     assert [queues["text"].get_nowait() for _ in range(2)] == ["你好，原始内容", "[image]"]
-    assert [queues["media"].get_nowait() for _ in range(2)] == ["[image]", "[voice]"]
+    assert [queues["media"].get_nowait() for _ in range(2)] == ["[图片]", "[语音]"]
     assert queues["text"].empty() and queues["media"].empty()
 
 
@@ -152,7 +152,7 @@ def test_payload_preserves_text_and_omits_private_media_fields():
     encoded = json.dumps(message_payload(media, ()))
     for secret in ("private", "secret-key", "cdn.example", "aeskey", "photo.png", "attachments"):
         assert secret not in encoded
-    assert message_payload(replace(original, content_type=ContentType.IMAGE), ())["content"] == "[image]"
+    assert message_payload(replace(original, content_type=ContentType.IMAGE), ())["content"] == "[图片]"
 
 
 @pytest.mark.parametrize("status,attempts", [(200, 1), (204, 1), (400, 1), (401, 1), (302, 1), (408, 3), (429, 3), (500, 3), (None, 3)])

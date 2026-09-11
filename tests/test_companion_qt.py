@@ -876,6 +876,69 @@ def test_independent_titlebar_minimize_does_not_show_launcher(
     repository.close()
 
 
+@pytest.mark.parametrize("native_only", [False, True])
+@pytest.mark.parametrize("side", ["left", "right"])
+def test_collapsed_launcher_never_rebinds_to_image_viewer(qt_app, tmp_path, native_only, side):
+    from types import SimpleNamespace
+
+    from agent_bridge.senders.uia_driver import SilentWeChatUiaDriver
+
+    state = {"main": None if native_only else SimpleNamespace(NativeWindowHandle=101), "minimized": False,
+             "rect": WindowRect(100, 100, 1000, 900)}
+    identities = {101: (77, "QtWindow")}
+    driver = SilentWeChatUiaDriver(lambda: SimpleNamespace(
+        _find_main=lambda: state["main"], _wechat_hwnds=lambda: [202, 101]))
+    driver._window_identity_reader = identities.get
+    driver._is_native_main_shell = lambda hwnd: hwnd == 101 and hwnd in identities
+    owners = []
+    def snapshot(hwnd):
+        if hwnd == 101:
+            return WindowSnapshot(True, True, state["minimized"], state["rect"], state["rect"])
+        if hwnd == 202:
+            return WindowSnapshot(True, True, False, WindowRect(0, 0, 1920, 1080))
+        return WindowSnapshot(False)
+    repository = SQLiteRepository(tmp_path / "launcher.db")
+    controller, _ = make_controller(repository)
+    window = make_window(
+        controller, [conversation()], settings=WeChatCompanionSettings(mode="docked", side=side),
+        hwnd_provider=driver.main_window_handle, probe=SimpleNamespace(snapshot=snapshot),
+        mover=SimpleNamespace(move=lambda *a: False),
+        owner=SimpleNamespace(bind=lambda hwnd, owner: owners.append(owner) or True))
+    try:
+        window._follow_wechat_window()
+        assert owners[-1] == 101
+        assert window.x() == (100 - window.settings.width if side == "left" else 1000)
+        assert window.y() == 100
+        state["rect"] = WindowRect(200, 300, 1100, 1100)
+        window._follow_wechat_window()
+        assert window.x() == (200 - window.settings.width if side == "left" else 1100)
+        assert window.y() == 300
+        state["rect"] = WindowRect(100, 100, 1000, 900)
+        window._collapse_to_launcher()
+        assert owners[-1] == 101
+        assert (window.launcher.x(), window.launcher.y()) == (112, 112)
+        state["main"] = None  # Preview opens and materialized UIA disappears.
+        window._follow_wechat_window()
+        assert owners[-1] == 101
+        assert (window.launcher.x(), window.launcher.y()) == (112, 112)
+        state["rect"] = WindowRect(200, 300, 1100, 1100)
+        window._follow_wechat_window()
+        assert (window.launcher.x(), window.launcher.y()) == (212, 312)
+        state["minimized"] = True
+        window._follow_wechat_window()
+        assert window.launcher.isHidden()  # Visible preview must not keep the launcher on screen.
+        state["minimized"] = False
+        window._follow_wechat_window()
+        assert window.launcher.isVisible()
+        identities.clear()  # Main destroyed; image preview is still available.
+        window._follow_wechat_window()
+        assert window.launcher.isHidden()
+        assert 202 not in owners
+    finally:
+        window.close()
+        repository.close()
+
+
 def test_collapsed_launcher_follows_wechat_and_restores_workbench(
     qt_app: QApplication, tmp_path: Path
 ) -> None:

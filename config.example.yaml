@@ -38,7 +38,7 @@ channels:
     group_controllers:
     # 每个地址单独筛选，所有条件同时满足才推送。默认空，不发送任何 webhook。
     # “本人”指当前登录微信账号；AI/本程序回复属于本人，还需 include_ai_replies=true。
-    # POST JSON；仅实时白名单消息，不补历史，不上传图片文件，重启不恢复待推送队列。
+    # POST JSON；仅实时白名单消息，不补历史，重启不恢复待推送队列。
     # 正文仅含 source/event_id/content/sender/conversation_id/occurred_at 六个字段。
     # 使用下方示例时将 webhooks: [] 改为 webhooks:，再取消示例注释。
     webhooks: []
@@ -46,6 +46,7 @@ channels:
       #   url: https://your-server.example/webhook
       #   enabled: true
       #   method: POST              # POST / PUT / PATCH，固定发送 JSON
+      #   payload_format: basic     # basic 六字段；memory 增加账号/会话类型/媒体类型，适配记忆服务
       #   headers:                  # 自定义请求头，默认 {}
       #     Authorization: "Bearer YOUR_TOKEN"
       #     X-API-Key: "YOUR_API_KEY"
@@ -57,6 +58,22 @@ channels:
       #   include_ai_replies: false
       #   timeout_seconds: 5         # 1–60 秒
       #   max_attempts: 3            # 1–10，含首次发送
+      #   upload:                    # 每个 Webhook 独立；省略或 url 留空时只传中文占位
+      #     protocol: multipart      # multipart 通用小文件；evolutionary 原始文件 + 分片
+      #     url: ""                  # 小文件 multipart/form-data 上传接口，后续填写
+      #     chunk_url: ""            # evolutionary：例如 http://your-server:8000/v1/uploads
+      #     method: POST             # POST / PUT / PATCH
+      #     headers: {}              # 独立明文请求头，不继承上面的 headers
+      #     file_field: file         # multipart 中的文件字段名
+      #     file_id_path: data->file_id # 也支持 field / data->field / data[0]->field
+      #     chunk_threshold_mb: 10   # 超过此大小走分片；单位 MiB
+      #     chunk_size_mb: 5         # 分片适配器使用；单位 MiB
+      #     max_file_mb: 100         # 超限不上传
+      #     timeout_seconds: 30      # 1–120 秒
+      #   # evolutionary 的 url 填 /v1/files，file_id_path 填 file_id，payload_format 选 memory。
+      #   # 通用 multipart 无默认分片协议，超阈值时明确失败，不偷偷整文件上传。
+      #   # 未配上传 URL：图片 [图片]、语音 [语音]、视频 [视频]；文字仍传原正文。
+      #   # 配置上传后失败则不推送该媒体消息；通知重试复用已获得的文件 ID。
     # AI 文本回复前缀；默认留空，截图、图片和内置提示不添加
     reply_prefix: ""
     # 私聊回复是否引用触发本次回复的原消息，默认关闭
