@@ -191,7 +191,7 @@ async def test_history_is_display_only(tmp_path: Path) -> None:
     controller.update_preferences(item(), load_history=True, history_limit=25)
     await controller.load_history(item())
 
-    assert history_calls == [("friend", 25)]
+    assert history_calls == [("friend", 20)]
     assert dispatched == []
     assert controller.timeline("friend")[0].historical is True
     repository.close()
@@ -352,7 +352,7 @@ async def test_async_local_history_recovers_legacy_image_from_wechat_cache(
         return None
 
     async def load_history(conversation_id: str, limit: int):
-        assert (conversation_id, limit) == ("friend", 50)
+        assert (conversation_id, limit) == ("friend", 20)
         return [
             replace(
                 incoming,

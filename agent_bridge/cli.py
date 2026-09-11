@@ -247,7 +247,9 @@ def _current_process_tree_ids(psutil_module) -> set[int]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agent-bridge")
-    parser.add_argument("--config", default="config.yaml", help="YAML configuration file")
+    parser.add_argument(
+        "--config", default="config.yaml", help="YAML configuration file"
+    )
     subcommands = parser.add_subparsers(dest="command", required=True)
     subcommands.add_parser("doctor", help="Run non-invasive configuration checks")
     subcommands.add_parser("run", help="Run the configured channel bridge")
@@ -263,7 +265,9 @@ def build_agent_factory(config: AppConfig) -> AgentFactory:
     )
 
     states = configured_availability(config)
-    effective_default(config, states)  # Fail before opening databases or touching WeChat.
+    effective_default(
+        config, states
+    )  # Fail before opening databases or touching WeChat.
     factory = AgentFactory()
     codex_config = config.agents.get("codex")
     if codex_config and states["codex"].available:
@@ -292,7 +296,9 @@ async def run_bridge(
     default_provider = config.runtime.default_provider
     if default_provider not in factory.providers():
         default_provider = factory.providers()[0]
-        logger.warning("默认 Agent 不可用，新会话使用 %s；已有 session 不迁移。", default_provider)
+        logger.warning(
+            "默认 Agent 不可用，新会话使用 %s；已有 session 不迁移。", default_provider
+        )
     repository = SQLiteRepository(config.runtime.database)
     repository.interrupt_running_jobs()
     # Reply queues are process-local.  Do not let persistent outbound rows
@@ -338,6 +344,8 @@ async def run_bridge(
         dispatcher.clear_queued_jobs,
         dispatcher.observe,
         available_providers=factory.providers(),
+        history_page_loader=channel.load_history_page,
+        history_message_loader=channel.load_history_messages,
     )
     dispatcher.subscribe_progress(controller.handle_agent_update)
     channel.subscribe_sender(controller.handle_sender_update)
@@ -391,7 +399,9 @@ async def run_bridge(
                 lifecycle.show_requested.connect(companion._expand_from_launcher)
                 lifecycle.hide_requested.connect(companion._collapse_to_launcher)
                 companion.visibility_changed.connect(lifecycle.set_window_visible)
-                lifecycle.set_window_visible(companion.isVisible() and not companion.isMinimized())
+                lifecycle.set_window_visible(
+                    companion.isVisible() and not companion.isMinimized()
+                )
             logger.info(
                 "工作台启动计时: UI constructed elapsed=%.3fs total=%.3fs",
                 time.perf_counter() - stage_started,
@@ -401,7 +411,9 @@ async def run_bridge(
             raise RuntimeError(
                 f"Unable to create WeChat companion window: {error}"
             ) from error
-        print("Agent bridge is running. Close the companion window or press Ctrl+C to stop.")
+        print(
+            "Agent bridge is running. Close the companion window or press Ctrl+C to stop."
+        )
         await companion.run()
     finally:
         if lifecycle is not None:
@@ -418,7 +430,9 @@ def doctor(config: AppConfig) -> int:
     runtime = config.runtime
     checks.append(("python", sys.version_info >= (3, 10), sys.version.split()[0]))
     working_directory = Path(runtime.default_working_directory)
-    checks.append(("working_directory", working_directory.is_dir(), str(working_directory)))
+    checks.append(
+        ("working_directory", working_directory.is_dir(), str(working_directory))
+    )
     for root in runtime.allowed_roots:
         checks.append(("allowed_root", Path(root).is_dir(), root))
     package_map = {
@@ -428,9 +442,21 @@ def doctor(config: AppConfig) -> int:
     }
     if config.wechat_enabled:
         checks.append(
-            ("wechat_allowlist", bool(config.wechat.allowed_private_ids or config.wechat.allowed_group_ids), "configured")
+            (
+                "wechat_allowlist",
+                bool(
+                    config.wechat.allowed_private_ids or config.wechat.allowed_group_ids
+                ),
+                "configured",
+            )
         )
-        checks.append(("dependency_wechat", _module_exists(package_map["wechat"]), package_map["wechat"]))
+        checks.append(
+            (
+                "dependency_wechat",
+                _module_exists(package_map["wechat"]),
+                package_map["wechat"],
+            )
+        )
         checks.append(("dependency_pyside6", _module_exists("PySide6"), "PySide6"))
         checks.append(("dependency_qasync", _module_exists("qasync"), "qasync"))
         checks.append(
@@ -509,8 +535,13 @@ def doctor(config: AppConfig) -> int:
     states = configured_availability(config)
     for provider, state in states.items():
         print(f"[{'OK' if state.available else 'WARN'}] {provider}: {state.reason}")
-    checks.append(("agent_available", any(s.available for s in states.values()),
-                   "Codex 或 Claude 至少一个可用"))
+    checks.append(
+        (
+            "agent_available",
+            any(s.available for s in states.values()),
+            "Codex 或 Claude 至少一个可用",
+        )
+    )
     for name, ok, detail in checks:
         print(f"[{'OK' if ok else 'FAIL'}] {name}: {detail}")
     return 0 if all(ok for _, ok, _ in checks) else 1

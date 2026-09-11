@@ -155,18 +155,13 @@ class _SerializedWeChatDb:
         ]
         if issues == ["ok"]:
             return True
-        findings = [
-            issue for issue in issues if issue != "*** in database main ***"
-        ]
+        findings = [issue for issue in issues if issue != "*** in database main ***"]
         usable = bool(findings) and all(
-            re.fullmatch(r"Page \d+ is never used", issue)
-            for issue in findings
+            re.fullmatch(r"Page \d+ is never used", issue) for issue in findings
         )
         if usable and not self._unused_page_warning_logged:
             self._unused_page_warning_logged = True
-            logger.warning(
-                "微信数据库快照仅包含未使用页面告警，继续只读消息读取"
-            )
+            logger.warning("微信数据库快照仅包含未使用页面告警，继续只读消息读取")
         return usable
 
     def _patch_message_connection_cleanup(self) -> None:
@@ -182,9 +177,7 @@ class _SerializedWeChatDb:
         if getattr(self._raw, "_agent_bridge_msg_conn_cleanup", False):
             return
         try:
-            self._raw._msg_conn = types.MethodType(
-                _safe_message_connection, self._raw
-            )
+            self._raw._msg_conn = types.MethodType(_safe_message_connection, self._raw)
             self._raw._agent_bridge_msg_conn_cleanup = True
         except (AttributeError, TypeError):
             # Keep compatibility with alternate/immutable DB implementations.
@@ -203,9 +196,8 @@ class _SerializedWeChatDb:
                     try:
                         return attribute(*args, **kwargs)
                     except sqlite3.DatabaseError as error:
-                        if (
-                            corruption_retried
-                            or not self._is_snapshot_corruption(error)
+                        if corruption_retried or not self._is_snapshot_corruption(
+                            error
                         ):
                             raise
                         corruption_retried = True
@@ -220,9 +212,7 @@ class _SerializedWeChatDb:
                     except RuntimeError as error:
                         if self._CONCURRENT_REWRITE_MARKER not in str(error):
                             raise
-                        if concurrent_attempt >= len(
-                            self._CONCURRENT_REWRITE_DELAYS
-                        ):
+                        if concurrent_attempt >= len(self._CONCURRENT_REWRITE_DELAYS):
                             if name == "get_new_messages":
                                 logger.warning(
                                     "微信消息库正在写入，本轮延后读取且保留消息水位: %s",
@@ -283,7 +273,9 @@ class WeChatCompanionSettings:
         if self.mode not in {"docked", "independent"}:
             raise ValueError("WeChat companion mode must be docked or independent")
         if self.side not in {"left", "right", "top", "bottom"}:
-            raise ValueError("WeChat companion side must be left, right, top, or bottom")
+            raise ValueError(
+                "WeChat companion side must be left, right, top, or bottom"
+            )
         if self.width < 320 or self.height < 240:
             raise ValueError("WeChat companion width/height are too small")
         if self.follow_interval <= 0:
@@ -311,9 +303,7 @@ class WeChatChannelSettings:
     # Keep message pickup responsive without making the WeChat DB poller busy.
     # This is the upper bound on delivery latency for an otherwise idle bridge.
     listener_interval: float = 0.25
-    hook_quote: WeChatHookQuoteSettings = field(
-        default_factory=WeChatHookQuoteSettings
-    )
+    hook_quote: WeChatHookQuoteSettings = field(default_factory=WeChatHookQuoteSettings)
     sender: WeChatSenderSettings = field(default_factory=WeChatSenderSettings)
     companion: WeChatCompanionSettings = field(default_factory=WeChatCompanionSettings)
 
@@ -331,6 +321,7 @@ class WeChatChannelSettings:
             raise ValueError(
                 "WeChat message_batch_window_seconds must be a finite non-negative number"
             )
+
 
 class WeChatChannelAdapter(ChannelAdapter):
     name = "wechat"
@@ -364,7 +355,9 @@ class WeChatChannelAdapter(ChannelAdapter):
         self._nickname = ""
         self._resolved_private_ids = settings.allowed_private_ids
         self._resolved_group_ids = settings.allowed_group_ids
-        self._allowlist_log_labels: dict[tuple[ConversationType, str], tuple[str, ...]] = {
+        self._allowlist_log_labels: dict[
+            tuple[ConversationType, str], tuple[str, ...]
+        ] = {
             (kind, value): (value,)
             for kind, values in (
                 (ConversationType.PRIVATE, settings.allowed_private_ids),
@@ -494,8 +487,12 @@ class WeChatChannelAdapter(ChannelAdapter):
         )
         stage_started = time.perf_counter()
         info = self._db.get_self_info()
-        self._account_id = str(info.get("username") or self.settings.account or "wechat")
-        self._nickname = str(info.get("remark") or info.get("nick_name") or self._account_id)
+        self._account_id = str(
+            info.get("username") or self.settings.account or "wechat"
+        )
+        self._nickname = str(
+            info.get("remark") or info.get("nick_name") or self._account_id
+        )
         logger.info(
             "微信通道启动计时: self info ready elapsed=%.3fs total=%.3fs",
             time.perf_counter() - stage_started,
@@ -516,9 +513,10 @@ class WeChatChannelAdapter(ChannelAdapter):
             time.perf_counter() - stage_started,
             time.perf_counter() - started,
         )
-        watermark = self.repository.get_channel_state(
-            self.name, self._account_id, "watermark"
-        ) or {}
+        watermark = (
+            self.repository.get_channel_state(self.name, self._account_id, "watermark")
+            or {}
+        )
         stage_started = time.perf_counter()
         self._sender = build_wechat_sender(
             self.settings.sender,
@@ -552,9 +550,7 @@ class WeChatChannelAdapter(ChannelAdapter):
 
     def _register_allowlisted_listeners(self) -> tuple[str, ...]:
         targets = tuple(
-            dict.fromkeys(
-                (*self._resolved_private_ids, *self._resolved_group_ids)
-            )
+            dict.fromkeys((*self._resolved_private_ids, *self._resolved_group_ids))
         )
         for conversation_id in targets:
             self._listener.add_listener(conversation_id, self._on_raw_message)
@@ -576,7 +572,9 @@ class WeChatChannelAdapter(ChannelAdapter):
         self._listener = None
         self._handler = None
 
-    async def send_message(self, target: ChannelTarget, message: OutboundMessage) -> str:
+    async def send_message(
+        self, target: ChannelTarget, message: OutboundMessage
+    ) -> str:
         if self._sender is None:
             raise RuntimeError("WeChat channel is not running")
         quote_enabled = (
@@ -657,17 +655,23 @@ class WeChatChannelAdapter(ChannelAdapter):
             # sole target. In a request like “截图网易云和微信”, it is one
             # member of a multi-window capture and must not short-circuit the
             # other targets.
-            is_wechat = (
-                len(application_queries) == 1
-                and self._is_wechat_target(application_queries[0])
+            is_wechat = len(application_queries) == 1 and self._is_wechat_target(
+                application_queries[0]
             )
             is_current = self._is_current_application_request(message.content)
             if is_desktop:
                 captured = [("桌面", await asyncio.to_thread(self._capture_desktop))]
             elif is_wechat:
-                captured = [("微信窗口", await asyncio.to_thread(self._capture_wechat_window))]
+                captured = [
+                    ("微信窗口", await asyncio.to_thread(self._capture_wechat_window))
+                ]
             elif is_current:
-                captured = [("当前应用", await asyncio.to_thread(self._capture_foreground_application))]
+                captured = [
+                    (
+                        "当前应用",
+                        await asyncio.to_thread(self._capture_foreground_application),
+                    )
+                ]
             else:
                 captured = []
                 for query in application_queries:
@@ -706,8 +710,7 @@ class WeChatChannelAdapter(ChannelAdapter):
                             else "当前应用截图"
                             if is_current
                             else (
-                                "、".join(requested_labels)
-                                + "截图"
+                                "、".join(requested_labels) + "截图"
                                 if multi_capture
                                 else "应用窗口截图"
                             )
@@ -757,9 +760,10 @@ class WeChatChannelAdapter(ChannelAdapter):
         # descriptions are rejected later with a clear usage message.
         if any(phrase in normalized for phrase in ("不要截图", "别截图", "无需截图")):
             return False
-        return any(phrase in normalized for phrase in cls._SCREENSHOT_PHRASES) and len(
-            normalized
-        ) > 2
+        return (
+            any(phrase in normalized for phrase in cls._SCREENSHOT_PHRASES)
+            and len(normalized) > 2
+        )
 
     @staticmethod
     def _is_wechat_screenshot_request(content: str) -> bool:
@@ -908,6 +912,20 @@ class WeChatChannelAdapter(ChannelAdapter):
             self._load_history_blocking, conversation_id, limit
         )
 
+    async def load_history_page(
+        self,
+        conversation_id: str,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[UnifiedMessage]:
+        if not 1 <= limit <= 20 or offset < 0:
+            raise ValueError("Invalid WeChat history page")
+        if self._db is None:
+            raise RuntimeError("WeChat channel is not running")
+        return await asyncio.to_thread(
+            self._load_history_blocking, conversation_id, limit, offset
+        )
+
     def normalize(self, raw_event: Any) -> UnifiedMessage:
         if not isinstance(raw_event, dict):
             raise TypeError("WeChat listener event must be a dictionary")
@@ -942,9 +960,7 @@ class WeChatChannelAdapter(ChannelAdapter):
         content_sender = group_sender or sender_id
         if is_group and content_sender:
             original_content = content
-            content = re.sub(
-                rf"^{re.escape(content_sender)}:\s*", "", content, count=1
-            )
+            content = re.sub(rf"^{re.escape(content_sender)}:\s*", "", content, count=1)
             if content == original_content:
                 display_name = str(raw_event.get("sender_name") or "").strip()
                 if display_name and display_name != content_sender:
@@ -1051,9 +1067,7 @@ class WeChatChannelAdapter(ChannelAdapter):
             str(value) for value in saved.get("sender_ids", ()) if str(value)
         )
         self._self_sender_usernames.update(
-            str(value)
-            for value in saved.get("sender_usernames", ())
-            if str(value)
+            str(value) for value in saved.get("sender_usernames", ()) if str(value)
         )
 
     def _remember_self_identity(self, raw_event: dict[str, Any]) -> None:
@@ -1107,16 +1121,23 @@ class WeChatChannelAdapter(ChannelAdapter):
                 },
             )
         message = replace(message, sender_name=self._sender_display_name(message))
-        webhook_message = replace(webhook_message, sender_name=(
-            message.sender_name if not bridge_outbound or webhook_is_self
-            else self._sender_display_name(webhook_message)
-        ), metadata={
-            **webhook_message.metadata, "is_self": webhook_is_self,
-            "bridge_outbound": bridge_outbound and webhook_is_self,
-        })
-        needs_upload_media = (message.content_type == ContentType.IMAGE and any(
-            hook.upload.url and hook.matches(webhook_message) for hook in self.settings.webhooks
-        ))
+        webhook_message = replace(
+            webhook_message,
+            sender_name=(
+                message.sender_name
+                if not bridge_outbound or webhook_is_self
+                else self._sender_display_name(webhook_message)
+            ),
+            metadata={
+                **webhook_message.metadata,
+                "is_self": webhook_is_self,
+                "bridge_outbound": bridge_outbound and webhook_is_self,
+            },
+        )
+        needs_upload_media = message.content_type == ContentType.IMAGE and any(
+            hook.upload.url and hook.matches(webhook_message)
+            for hook in self.settings.webhooks
+        )
         if not needs_upload_media:
             self._submit_webhook_message(webhook_message)
         message = self._prepare_for_controller(message)
@@ -1143,7 +1164,9 @@ class WeChatChannelAdapter(ChannelAdapter):
         async def dispatch_message() -> None:
             try:
                 await self._dispatch_message_in_order(
-                    message, raw_event, webhook_message=webhook_message if needs_upload_media else None
+                    message,
+                    raw_event,
+                    webhook_message=webhook_message if needs_upload_media else None,
                 )
             finally:
                 if media_pending:
@@ -1154,8 +1177,12 @@ class WeChatChannelAdapter(ChannelAdapter):
 
     def _submit_webhook_message(self, message: UnifiedMessage) -> None:
         try:
-            self._webhooks.submit(message, self._allowlist_log_labels.get(
-                (message.conversation_type, message.conversation_id), ()))
+            self._webhooks.submit(
+                message,
+                self._allowlist_log_labels.get(
+                    (message.conversation_type, message.conversation_id), ()
+                ),
+            )
         except Exception as error:  # noqa: BLE001 - webhooks must never break reception
             logger.warning("Webhook 消息入队失败: error=%s", type(error).__name__)
 
@@ -1177,7 +1204,10 @@ class WeChatChannelAdapter(ChannelAdapter):
             await asyncio.sleep(0.05)
 
     async def _dispatch_message_in_order(
-        self, message: UnifiedMessage, raw_event: dict[str, Any], *,
+        self,
+        message: UnifiedMessage,
+        raw_event: dict[str, Any],
+        *,
         webhook_message: UnifiedMessage | None = None,
     ) -> None:
         """Hydrate and dispatch one conversation without reordering its messages."""
@@ -1198,7 +1228,9 @@ class WeChatChannelAdapter(ChannelAdapter):
             if webhook_message is not None:
                 # Reuse the already decrypted image; keep the original sender and
                 # untrimmed content, rather than controller/Agent trigger mutations.
-                self._submit_webhook_message(replace(webhook_message, attachments=hydrated.attachments))
+                self._submit_webhook_message(
+                    replace(webhook_message, attachments=hydrated.attachments)
+                )
             await self._handler(hydrated)
 
     @staticmethod
@@ -1348,6 +1380,7 @@ class WeChatChannelAdapter(ChannelAdapter):
                     )
                     result: dict[str, dict[str, Any]] = {}
                     for row in rows:
+
                         def value(column: str) -> Any:
                             if hasattr(row, "get"):
                                 return row.get(column)
@@ -1416,7 +1449,10 @@ class WeChatChannelAdapter(ChannelAdapter):
                 candidate = self._resolve_conversation_username(
                     binding.conversation_id, conversation_type, session_ids
                 )
-                if candidate != binding.conversation_id or conversation_type == candidates[-1]:
+                if (
+                    candidate != binding.conversation_id
+                    or conversation_type == candidates[-1]
+                ):
                     conversation_id = candidate
                     break
             resolved.append(replace(binding, conversation_id=conversation_id))
@@ -1451,9 +1487,15 @@ class WeChatChannelAdapter(ChannelAdapter):
                 logger.info("微信白名单已解析: %s -> %s", value, username)
         # Replace this type's mapping atomically; keep private/group names separate.
         self._allowlist_log_labels = {
-            **{key: values for key, values in self._allowlist_log_labels.items()
-               if key[0] != conversation_type},
-            **{(conversation_type, username): tuple(values) for username, values in labels.items()},
+            **{
+                key: values
+                for key, values in self._allowlist_log_labels.items()
+                if key[0] != conversation_type
+            },
+            **{
+                (conversation_type, username): tuple(values)
+                for username, values in labels.items()
+            },
         }
         return tuple(resolved)
 
@@ -1525,10 +1567,43 @@ class WeChatChannelAdapter(ChannelAdapter):
         return active[0] if len(active) == 1 else None
 
     def _load_history_blocking(
-        self, conversation_id: str, limit: int
+        self,
+        conversation_id: str,
+        limit: int,
+        offset: int = 0,
+    ) -> list[UnifiedMessage]:
+        rows = self._db.get_messages(
+            conversation_id, limit=limit, **({"offset": offset} if offset else {})
+        )
+        return self._normalize_history_rows(conversation_id, rows)
+
+    async def load_history_messages(
+        self,
+        conversation_id: str,
+        message_ids: tuple[str, ...],
+    ) -> list[UnifiedMessage]:
+        """Hydrate only the legacy media rows in the displayed local page."""
+        if len(message_ids) > 20:
+            raise ValueError("History media page exceeds 20 messages")
+
+        def load() -> list[UnifiedMessage]:
+            if self._db is None:
+                return []
+            rows = []
+            for message_id in message_ids:
+                prefix, _, local_id = message_id.rpartition(":")
+                if prefix == conversation_id and local_id.isdigit():
+                    row = self._db.get_message_row(conversation_id, int(local_id))
+                    if row:
+                        rows.append(row)
+            return self._normalize_history_rows(conversation_id, rows)
+
+        return await asyncio.to_thread(load)
+
+    def _normalize_history_rows(
+        self, conversation_id: str, rows: list[dict]
     ) -> list[UnifiedMessage]:
         messages: list[UnifiedMessage] = []
-        rows = self._db.get_messages(conversation_id, limit=limit)
         group_sender_by_numeric_id: dict[str, str] = {}
         if conversation_id.endswith("@chatroom"):
             for raw in rows:
@@ -1546,9 +1621,9 @@ class WeChatChannelAdapter(ChannelAdapter):
             if conversation_id.endswith("@chatroom"):
                 hinted = self._group_sender_prefix(event.get("content"))
                 numeric_id = str(event.get("sender_id") or "").strip()
-                raw_is_self = self._is_self_message(event) or self._is_self_sender_value(
-                    hinted
-                )
+                raw_is_self = self._is_self_message(
+                    event
+                ) or self._is_self_sender_value(hinted)
                 if raw_is_self:
                     # Preserve the raw self marker.  A group prefix may still
                     # be removed by normalize(), but it must not change who
@@ -1556,13 +1631,10 @@ class WeChatChannelAdapter(ChannelAdapter):
                     event["sender_username"] = self._account_id
                 else:
                     event["sender_username"] = (
-                        (
-                            hinted
-                            if self._is_group_sender_token(hinted)
-                            else group_sender_by_numeric_id.get(numeric_id)
-                        )
-                        or event.get("sender_username")
-                    )
+                        hinted
+                        if self._is_group_sender_token(hinted)
+                        else group_sender_by_numeric_id.get(numeric_id)
+                    ) or event.get("sender_username")
             is_self = self._is_self_message(event)
             sender_id = str(
                 event.get("sender_username")
@@ -1784,9 +1856,7 @@ class WeChatChannelAdapter(ChannelAdapter):
         md5 = downloader._img_md5(row)
         if not md5:
             return None
-        dat_path = downloader._find_dat(
-            conversation_id, md5, row["create_time"]
-        )
+        dat_path = downloader._find_dat(conversation_id, md5, row["create_time"])
         suffix = ""
         if not dat_path:
             dat_path = downloader._find_dat(
@@ -1831,9 +1901,7 @@ class WeChatChannelAdapter(ChannelAdapter):
             except (OSError, RuntimeError, TypeError, ValueError):
                 matches = []
             exact = [
-                item
-                for item in matches
-                if str(item.get("username") or "") == username
+                item for item in matches if str(item.get("username") or "") == username
             ]
             if len(exact) == 1:
                 self._cache_contact_display_name(exact[0])
@@ -1959,9 +2027,7 @@ class WeChatChannelAdapter(ChannelAdapter):
             str(row.get("content") or ""),
         )
 
-    def _claim_delivery_row(
-        self, conversation_id: str, row: dict[str, Any]
-    ) -> bool:
+    def _claim_delivery_row(self, conversation_id: str, row: dict[str, Any]) -> bool:
         key = self._delivery_row_key(row)
         claimed = self._verified_delivery_rows.setdefault(conversation_id, set())
         if key in claimed:

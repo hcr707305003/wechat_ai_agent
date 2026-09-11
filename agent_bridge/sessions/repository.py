@@ -222,7 +222,9 @@ class SQLiteRepository:
         if "unique(provider,native_session_id)" not in normalized_schema:
             return
         self._connection.execute("DROP INDEX IF EXISTS idx_native_active")
-        self._connection.execute("ALTER TABLE native_sessions RENAME TO native_sessions_legacy")
+        self._connection.execute(
+            "ALTER TABLE native_sessions RENAME TO native_sessions_legacy"
+        )
         self._connection.execute(
             """CREATE TABLE native_sessions (
                 id TEXT PRIMARY KEY,
@@ -263,7 +265,10 @@ class SQLiteRepository:
             )
 
     def create_session(
-        self, current_provider: str, working_directory: str, session_id: str | None = None
+        self,
+        current_provider: str,
+        working_directory: str,
+        session_id: str | None = None,
     ) -> UnifiedSession:
         session = UnifiedSession(
             id=session_id or new_id("session"),
@@ -338,7 +343,9 @@ class SQLiteRepository:
                 ),
             )
 
-    def find_session_for_message(self, message: UnifiedMessage) -> UnifiedSession | None:
+    def find_session_for_message(
+        self, message: UnifiedMessage
+    ) -> UnifiedSession | None:
         return self.find_session_for_binding(*message.binding_key)
 
     def find_session_for_binding(
@@ -431,7 +438,9 @@ class SQLiteRepository:
                 (utc_now().isoformat(), native_id),
             )
 
-    def list_native_sessions(self, unified_session_id: str, provider: str) -> list[NativeSession]:
+    def list_native_sessions(
+        self, unified_session_id: str, provider: str
+    ) -> list[NativeSession]:
         with self._lock:
             rows = self._connection.execute(
                 """SELECT * FROM native_sessions WHERE unified_session_id = ? AND provider = ?
@@ -528,6 +537,56 @@ class SQLiteRepository:
             for row in rows
         ]
 
+    def session_message_page(
+        self,
+        session_id: str,
+        *,
+        before: tuple[str, int] | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Read one displayable page; rowid breaks ties between equal timestamps."""
+        if not 1 <= limit <= 100:
+            raise ValueError("History page size must be between 1 and 100")
+        cursor_sql = " AND (created_at, rowid) < (?, ?)" if before else ""
+        params = (session_id, *(before or ()), limit)
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT rowid AS sequence, * FROM messages "
+                "WHERE unified_session_id = ? AND role IN ('user', 'assistant')"
+                + cursor_sql
+                + " ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                params,
+            ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "sequence": row["sequence"],
+                "channel": row["channel"],
+                "channel_message_id": row["channel_message_id"],
+                "role": row["role"],
+                "event_type": row["event_type"],
+                "provider": row["provider"],
+                "content": json.loads(row["content_json"]),
+                "metadata": json.loads(row["metadata_json"]),
+                "created_at": row["created_at"],
+            }
+            for row in reversed(rows)
+        ]
+
+    def has_attachment_history(self, session_id: str, path: str) -> bool:
+        """Check legacy delivery recovery without reading the entire transcript."""
+        with self._lock:
+            return (
+                self._connection.execute(
+                    """SELECT 1 FROM messages, json_each(
+                       messages.metadata_json, '$.bridge_attachments') AS attachment
+                   WHERE unified_session_id = ?
+                     AND json_extract(attachment.value, '$.path') = ? LIMIT 1""",
+                    (session_id, path),
+                ).fetchone()
+                is not None
+            )
+
     def clear_session_messages(self, session_id: str) -> int:
         """Delete local message history while preserving the session and bindings."""
         now = utc_now().isoformat()
@@ -546,7 +605,9 @@ class SQLiteRepository:
             )
         return int(result.rowcount)
 
-    def rollup_summary(self, session_id: str, retain: int = 40, max_chars: int = 12000) -> str:
+    def rollup_summary(
+        self, session_id: str, retain: int = 40, max_chars: int = 12000
+    ) -> str:
         """Deterministically compact older normalized events into the session summary."""
         with self._lock:
             rows = self._connection.execute(
@@ -567,7 +628,11 @@ class SQLiteRepository:
         lines: list[str] = []
         for row in compacted:
             content = json.loads(row["content_json"])
-            text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+            text = (
+                content
+                if isinstance(content, str)
+                else json.dumps(content, ensure_ascii=False)
+            )
             text = " ".join(text.split())
             if len(text) > 300:
                 text = text[:297] + "..."
@@ -608,7 +673,9 @@ class SQLiteRepository:
                 ),
             )
 
-    def update_job(self, job_id: str, status: JobStatus, error: str | None = None) -> None:
+    def update_job(
+        self, job_id: str, status: JobStatus, error: str | None = None
+    ) -> None:
         with self._lock, self._connection:
             self._connection.execute(
                 "UPDATE jobs SET status = ?, error = ?, updated_at = ? WHERE id = ?",

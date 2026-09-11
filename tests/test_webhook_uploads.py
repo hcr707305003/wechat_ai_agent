@@ -185,6 +185,57 @@ def test_failure_does_not_send_placeholder_or_block_other_endpoint(tmp_path, cap
         dispatcher.stop()
 
 
+@pytest.mark.parametrize("kind", ["image", "voice", "video"])
+@pytest.mark.parametrize("scenario,counts", [
+    ("empty", (0, 0, 0)),
+    ("missing_path", (1, 0, 0)),
+    ("wrong_kind", (1, 1, 0)),
+    ("multiple", (2, 2, 2)),
+    ("success", (1, 1, 1)),
+])
+def test_media_upload_logs_type_and_counts_without_private_data(tmp_path, caplog, kind, scenario, counts):
+    caplog.set_level("INFO", logger="agent_bridge.webhooks")
+    message = media(tmp_path, kind)
+    attachment = message.attachments[0]
+    attachments = {
+        "empty": (),
+        "missing_path": (replace(attachment, path=None),),
+        "wrong_kind": (replace(attachment, kind="file"),),
+        "multiple": (attachment, attachment),
+        "success": (attachment,),
+    }[scenario]
+    message = replace(message, attachments=attachments, content="PRIVATE_BODY")
+    hook = settings(upload={"url": "https://example.com/PRIVATE_UPLOAD",
+                            "headers": {"Authorization": "Bearer PRIVATE_TOKEN"}})
+    sent = Queue()
+    dispatcher = WebhookDispatcher(
+        (hook,),
+        upload=lambda s, m, e, stop: upload_media(
+            s, m, e, stop, small=lambda *args: {"data": {"file_id": "PRIVATE_FILE_ID"}}),
+        post=lambda *args: sent.put(True) or 200,
+    )
+    dispatcher.start()
+    try:
+        dispatcher.submit(message, ())
+        outcome = "成功" if scenario == "success" else "失败"
+        wait_until(lambda: f"Webhook 媒体上传{outcome}" in caplog.text)
+        logs = [r.getMessage() for r in caplog.records if "Webhook 媒体上传" in r.getMessage()]
+        assert len(logs) == 2
+        for line in logs:
+            assert f"media_type={kind}" in line
+            assert f"attachments={counts[0]} local_paths={counts[1]} matching_paths={counts[2]}" in line
+        if scenario != "success":
+            assert "没有唯一可上传的本地媒体文件" in logs[-1]
+            assert sent.empty()
+        else:
+            wait_until(lambda: not sent.empty())
+        for private in ("PRIVATE_BODY", "PRIVATE_UPLOAD", "PRIVATE_TOKEN", "PRIVATE_FILE_ID",
+                        str(tmp_path), attachment.name or "private-name"):
+            assert private not in caplog.text
+    finally:
+        dispatcher.stop()
+
+
 @pytest.fixture
 def upload_server():
     requests = Queue()

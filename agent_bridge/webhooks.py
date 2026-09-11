@@ -254,8 +254,16 @@ class _EndpointWorker:
             if self.settings.upload.url and message.content_type.value in MEDIA_MARKERS:
                 # Upload once, before webhook retries; never create another remote file
                 # just because the notification receiver returned a transient error.
+                media_type = message.content_type.value
+                upload_log_args = (
+                    self.index, event_id, media_type, len(message.attachments),
+                    sum(bool(a.path) for a in message.attachments),
+                    sum(bool(a.path) and a.kind == media_type for a in message.attachments),
+                )
                 try:
-                    logger.info("Webhook 媒体上传开始: webhook=#%s event=%s", self.index, event_id)
+                    logger.info(
+                        "Webhook 媒体上传开始: webhook=#%s event=%s media_type=%s "
+                        "attachments=%s local_paths=%s matching_paths=%s", *upload_log_args)
                     file_id = self.upload(self.settings.upload, message, event_id, self.stopped)
                     payload["content"] = file_id
                     if self.settings.payload_format == "memory":
@@ -263,10 +271,14 @@ class _EndpointWorker:
                             message.content_type.value]
                 except Exception as error:  # noqa: BLE001 - endpoint failures must remain isolated
                     reason = str(error) if isinstance(error, UploadError) else type(error).__name__
-                    logger.warning("Webhook 媒体上传失败，未推送: webhook=#%s event=%s reason=%s",
-                                   self.index, event_id, reason)
+                    logger.warning(
+                        "Webhook 媒体上传失败，未推送: webhook=#%s event=%s media_type=%s "
+                        "attachments=%s local_paths=%s matching_paths=%s reason=%s",
+                        *upload_log_args, reason)
                     continue
-                logger.info("Webhook 媒体上传成功: webhook=#%s event=%s", self.index, event_id)
+                logger.info(
+                    "Webhook 媒体上传成功: webhook=#%s event=%s media_type=%s "
+                    "attachments=%s local_paths=%s matching_paths=%s", *upload_log_args)
             body = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
             if len(body) > MAX_PAYLOAD_BYTES:
                 logger.warning("Webhook 消息过大，未推送: event=%s", event_id)

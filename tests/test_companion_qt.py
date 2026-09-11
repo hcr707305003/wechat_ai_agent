@@ -44,6 +44,185 @@ from agent_bridge.senders.wechat import SenderUpdate
 from agent_bridge.sessions.repository import SQLiteRepository
 
 
+@pytest.mark.asyncio
+async def test_pagination_merges_sources_before_choosing_next_twenty(qt_app, tmp_path):
+    from datetime import timedelta
+
+    from test_history_pagination import make_history
+
+    repo, _, item, base, controller = make_history(tmp_path, 40)
+    calls = []
+
+    async def page(conversation_id, limit, offset):
+        calls.append(offset)
+        return [
+            replace(
+                base,
+                message_id=f"native-{i}",
+                content=f"native-{i}",
+                created_at=base.created_at + timedelta(days=1, seconds=i),
+            )
+            for i in range(99 - offset, 99 - offset - limit, -1)
+        ]
+
+    controller.history_page_loader = page
+    controller.update_preferences(item, load_history=True, history_limit=100)
+    await controller.load_local_history_async(item)
+    await controller.load_history(item)
+    window = make_window(controller, [item])
+    window.show()
+    QTest.qWait(30)
+    try:
+        # Construction schedules a refresh of native history; finish it first.
+        await asyncio.sleep(0.05)
+        QTest.qWait(30)
+        window._request_older_history()
+        await window._history_page_task
+        QTest.qWait(30)
+        assert len(window._message_cards) == 40
+        assert all(
+            entry.content.startswith("native-")
+            for entry in window._timeline_entries.values()
+        )
+        assert 20 in calls
+    finally:
+        window.close()
+        repo.close()
+
+
+@pytest.mark.asyncio
+async def test_history_pagination_first_twenty_prepend_reuses_cards_and_anchor(
+    qt_app, tmp_path
+):
+    from PySide6.QtCore import QPoint
+    from test_history_pagination import make_history
+
+    repo, _, item, _, controller = make_history(tmp_path, 105)
+    await controller.load_local_history_async(item)
+    window = make_window(controller, [item])
+    window.resize(440, 600)
+    window.show()
+    QTest.qWait(200)
+    try:
+        assert len(window._message_cards) == 20
+        bar = window.timeline_scroll.verticalScrollBar()
+        assert bar.value() == bar.maximum()
+        old_cards = dict(window._message_cards)
+        old_card = next(iter(old_cards.values()))
+
+        # Unchanged images/text must not be decoded or relaid out again.
+        def unexpected_update(entry):
+            raise AssertionError("An unchanged existing card should be reused as-is")
+
+        old_card.update_entry = unexpected_update
+        window._cancel_timeline_bottom_follow()
+        bar.setValue(0)
+        anchor = next(iter(old_cards.values()))
+        previous_y = anchor.mapTo(window.timeline_scroll.viewport(), QPoint()).y()
+        window._request_older_history()
+        assert not window.history_page_button.isEnabled()
+        await window._history_page_task
+        QTest.qWait(50)
+        assert len(window._message_cards) == 40
+        assert all(
+            window._message_cards[key] is card for key, card in old_cards.items()
+        )
+        assert anchor.isVisible()
+        assert (
+            abs(
+                anchor.mapTo(window.timeline_scroll.viewport(), QPoint()).y()
+                - previous_y
+            )
+            <= 2
+        )
+        assert not window._timeline_follow_bottom
+        assert window.timeline_scroll.horizontalScrollBar().maximum() == 0
+    finally:
+        window.close()
+        repo.close()
+
+
+@pytest.mark.asyncio
+async def test_quote_loads_older_pages_without_rendering_entire_transcript(
+    qt_app, tmp_path
+):
+    from test_history_pagination import make_history
+
+    repo, _, item, base, controller = make_history(tmp_path, 105)
+    await controller.load_local_history_async(item)
+    reply = TimelineEntry(
+        "friend",
+        "AI",
+        "reply",
+        "outbound",
+        quote=QuotePreview(
+            "Friend", "0", ContentType.TEXT, "wechat:0", base.created_at
+        ),
+    )
+    controller._realtime["friend"].append(reply)
+    window = make_window(controller, [item])
+    window.show()
+    QTest.qWait(200)
+    try:
+        assert len(window._message_cards) == 20
+        window._jump_to_quoted_message(reply.entry_id)
+        await window._history_page_task
+        QTest.qWait(50)
+        assert len(window._message_cards) <= 20
+        assert any(
+            entry.source_key == "wechat:0"
+            for entry in window._timeline_entries.values()
+        )
+        assert window.history_latest_button.isVisible()
+        window._return_to_latest()
+        QTest.qWait(200)
+        assert len(window._message_cards) == 20
+        assert reply.entry_id in window._message_cards
+        assert window._timeline_is_at_bottom()
+    finally:
+        window.close()
+        repo.close()
+
+
+@pytest.mark.asyncio
+async def test_switch_while_history_loading_does_not_repaint_previous_chat(
+    qt_app, tmp_path, monkeypatch
+):
+    from test_history_pagination import make_history
+
+    repo, _, item, _, controller = make_history(tmp_path)
+    await controller.load_local_history_async(item)
+    window = make_window(controller, [item, conversation("other")])
+    window.show()
+    QTest.qWait(30)
+    gate = asyncio.Event()
+    started = asyncio.Event()
+
+    async def slow_page(*args):
+        started.set()
+        await gate.wait()
+
+    monkeypatch.setattr(controller, "load_older_history", slow_page)
+    try:
+        window._request_older_history()
+        task = window._history_page_task
+        await started.wait()
+        window.conversation_list.setCurrentRow(1)
+        gate.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await asyncio.sleep(0.05)
+        QTest.qWait(50)
+        assert window._selected_item().conversation_id == "other"
+        assert all(
+            entry.conversation_id == "other"
+            for entry in window._timeline_entries.values()
+        )
+        assert window._history_visible_count == 20
+    finally:
+        window.close()
+        repo.close()
+
+
 @pytest.fixture(scope="session")
 def qt_app() -> QApplication:
     app = QApplication.instance() or QApplication([])
@@ -88,7 +267,9 @@ def make_controller(repository: SQLiteRepository):
         history_calls.append((conversation_id, limit))
         return [incoming("history", conversation_id)]
 
-    return CompanionController(repository, dispatch, load_history, "codex"), history_calls
+    return CompanionController(
+        repository, dispatch, load_history, "codex"
+    ), history_calls
 
 
 def test_unavailable_agent_badge_is_grey_and_reply_controls_disabled(qt_app, tmp_path):
@@ -157,10 +338,17 @@ async def test_renders_messages_and_tracks_unread(
     await controller.handle(incoming("two", "other"))
     qt_app.processEvents()
 
-    visible_cards = [card for card in window.findChildren(MessageCard) if card.isVisible()]
+    visible_cards = [
+        card for card in window.findChildren(MessageCard) if card.isVisible()
+    ]
     assert len(visible_cards) == 2
-    assert any("message-one" in label.text() for label in visible_cards[0].findChildren(type(window.title_label)))
-    visible_rows = [row for row in window.findChildren(ConversationRow) if row.isVisible()]
+    assert any(
+        "message-one" in label.text()
+        for label in visible_cards[0].findChildren(type(window.title_label))
+    )
+    visible_rows = [
+        row for row in window.findChildren(ConversationRow) if row.isVisible()
+    ]
     assert len(visible_rows) == 2
     assert "other" in window._unread
 
@@ -188,9 +376,7 @@ async def test_switching_conversation_reflows_narrow_timeline_cards(
 
     long_path = r"C:\Users\Administrator\Desktop\enterprise\wechat_ai_agent\项目下。"
     await controller.handle(replace(incoming("friend-long"), content=long_path))
-    await controller.handle(
-        replace(incoming("other-long", "other"), content=long_path)
-    )
+    await controller.handle(replace(incoming("other-long", "other"), content=long_path))
     qt_app.processEvents()
 
     window.conversation_list.setCurrentRow(1)
@@ -235,9 +421,24 @@ async def test_timeline_updates_wait_until_scrolled_to_bottom(
     assert window.new_messages_button.isVisible()
     assert "1 条新消息" in window.new_messages_button.text()
 
+    # An initial/native history load can finish after the user scrolled up.
+    controller._notify("timeline", "friend", "history")
+    QTest.qWait(200)
+    assert bar.value() == 0
+    assert "1 条新消息" in window.new_messages_button.text()
+    assert all(
+        entry.content != "message-new" for entry in window._timeline_entries.values()
+    )
+    await controller.handle(incoming("new-2"))
+    qt_app.processEvents()
+    assert "2 条新消息" in window.new_messages_button.text()
+
     bar.setValue(bar.maximum())
     qt_app.processEvents()
-    assert len(window._message_cards) == rendered_count + 1
+    assert len(window._message_cards) == 20
+    assert any(
+        entry.content == "message-new" for entry in window._timeline_entries.values()
+    )
     assert not window.new_messages_button.isVisible()
     window.close()
     repository.close()
@@ -307,8 +508,11 @@ async def test_settings_are_persisted_and_history_is_loaded(
     assert preferences.send_images_enabled is True
     assert preferences.load_history is True
     assert window.history_limit.isEnabled()
-    assert history_calls == [("friend", 50)]
-    assert any("message-history" in label.text() for label in window.findChildren(type(window.title_label)))
+    assert history_calls == [("friend", 20)]
+    assert any(
+        "message-history" in label.text()
+        for label in window.findChildren(type(window.title_label))
+    )
     window.close()
     repository.close()
 
@@ -404,8 +608,14 @@ def test_image_viewer_supports_zoom_rotation_and_actual_size(
     assert "90°" in viewer._info_label.text()
     viewer._image_label.wheel_zoom.emit(1)
     assert "125%" in viewer._info_label.text()
-    assert viewer._scroll_area.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-    assert viewer._scroll_area.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    assert (
+        viewer._scroll_area.horizontalScrollBarPolicy()
+        == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    )
+    assert (
+        viewer._scroll_area.verticalScrollBarPolicy()
+        == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    )
     viewer.close()
 
 
@@ -550,9 +760,7 @@ def test_sidebar_collapses_at_narrow_width(
     qt_app.processEvents()
     assert window.sidebar.width() == 80
     assert window.section_label.isHidden()
-    compact_row = window.conversation_list.itemWidget(
-        window.conversation_list.item(0)
-    )
+    compact_row = window.conversation_list.itemWidget(window.conversation_list.item(0))
     assert isinstance(compact_row, ConversationRow)
     assert compact_row.details.isHidden()
     compact_rect = window.conversation_list.visualItemRect(
@@ -580,9 +788,7 @@ def test_sidebar_collapses_at_narrow_width(
     qt_app.processEvents()
     assert window.sidebar.width() == 190
     assert not window.section_label.isHidden()
-    expanded_row = window.conversation_list.itemWidget(
-        window.conversation_list.item(0)
-    )
+    expanded_row = window.conversation_list.itemWidget(window.conversation_list.item(0))
     assert isinstance(expanded_row, ConversationRow)
     assert not expanded_row.details.isHidden()
     expanded_rect = window.conversation_list.visualItemRect(
@@ -608,8 +814,7 @@ def test_compact_conversation_row_centers_avatar_and_exposes_name(
     assert row.avatar.geometry().left() >= 0
     assert row.avatar.geometry().right() < avatar_parent.width()
     assert (
-        abs(row.avatar.geometry().center().x() - avatar_parent.rect().center().x())
-        <= 1
+        abs(row.avatar.geometry().center().x() - avatar_parent.rect().center().x()) <= 1
     )
     row.close()
 
@@ -846,10 +1051,7 @@ def test_custom_titlebar_has_only_accessible_settings_minimize_and_close(
 def test_calculates_each_windows_resize_hit(
     x: int, y: int, expected: int | None
 ) -> None:
-    assert (
-        calculate_resize_hit(WindowRect(100, 100, 500, 400), x, y, 8)
-        == expected
-    )
+    assert calculate_resize_hit(WindowRect(100, 100, 500, 400), x, y, 8) == expected
 
 
 def test_independent_titlebar_minimize_does_not_show_launcher(
@@ -878,32 +1080,48 @@ def test_independent_titlebar_minimize_does_not_show_launcher(
 
 @pytest.mark.parametrize("native_only", [False, True])
 @pytest.mark.parametrize("side", ["left", "right"])
-def test_collapsed_launcher_never_rebinds_to_image_viewer(qt_app, tmp_path, native_only, side):
+def test_collapsed_launcher_never_rebinds_to_image_viewer(
+    qt_app, tmp_path, native_only, side
+):
     from types import SimpleNamespace
 
     from agent_bridge.senders.uia_driver import SilentWeChatUiaDriver
 
-    state = {"main": None if native_only else SimpleNamespace(NativeWindowHandle=101), "minimized": False,
-             "rect": WindowRect(100, 100, 1000, 900)}
+    state = {
+        "main": None if native_only else SimpleNamespace(NativeWindowHandle=101),
+        "minimized": False,
+        "rect": WindowRect(100, 100, 1000, 900),
+    }
     identities = {101: (77, "QtWindow")}
-    driver = SilentWeChatUiaDriver(lambda: SimpleNamespace(
-        _find_main=lambda: state["main"], _wechat_hwnds=lambda: [202, 101]))
+    driver = SilentWeChatUiaDriver(
+        lambda: SimpleNamespace(
+            _find_main=lambda: state["main"], _wechat_hwnds=lambda: [202, 101]
+        )
+    )
     driver._window_identity_reader = identities.get
     driver._is_native_main_shell = lambda hwnd: hwnd == 101 and hwnd in identities
     owners = []
+
     def snapshot(hwnd):
         if hwnd == 101:
-            return WindowSnapshot(True, True, state["minimized"], state["rect"], state["rect"])
+            return WindowSnapshot(
+                True, True, state["minimized"], state["rect"], state["rect"]
+            )
         if hwnd == 202:
             return WindowSnapshot(True, True, False, WindowRect(0, 0, 1920, 1080))
         return WindowSnapshot(False)
+
     repository = SQLiteRepository(tmp_path / "launcher.db")
     controller, _ = make_controller(repository)
     window = make_window(
-        controller, [conversation()], settings=WeChatCompanionSettings(mode="docked", side=side),
-        hwnd_provider=driver.main_window_handle, probe=SimpleNamespace(snapshot=snapshot),
+        controller,
+        [conversation()],
+        settings=WeChatCompanionSettings(mode="docked", side=side),
+        hwnd_provider=driver.main_window_handle,
+        probe=SimpleNamespace(snapshot=snapshot),
         mover=SimpleNamespace(move=lambda *a: False),
-        owner=SimpleNamespace(bind=lambda hwnd, owner: owners.append(owner) or True))
+        owner=SimpleNamespace(bind=lambda hwnd, owner: owners.append(owner) or True),
+    )
     try:
         window._follow_wechat_window()
         assert owners[-1] == 101
@@ -926,7 +1144,9 @@ def test_collapsed_launcher_never_rebinds_to_image_viewer(qt_app, tmp_path, nati
         assert (window.launcher.x(), window.launcher.y()) == (212, 312)
         state["minimized"] = True
         window._follow_wechat_window()
-        assert window.launcher.isHidden()  # Visible preview must not keep the launcher on screen.
+        assert (
+            window.launcher.isHidden()
+        )  # Visible preview must not keep the launcher on screen.
         state["minimized"] = False
         window._follow_wechat_window()
         assert window.launcher.isVisible()
@@ -964,13 +1184,8 @@ def test_collapsed_launcher_follows_wechat_and_restores_workbench(
 
         def move(self, hwnd, geometry) -> bool:
             self.calls.append((hwnd, geometry))
-            if (
-                self.window is not None
-                and hwnd == int(self.window.launcher.winId())
-            ):
-                self.launcher_visibility.append(
-                    self.window.launcher.isVisible()
-                )
+            if self.window is not None and hwnd == int(self.window.launcher.winId()):
+                self.launcher_visibility.append(self.window.launcher.isVisible())
             return self.succeed
 
     class Owner:
@@ -1072,7 +1287,9 @@ def test_lifecycle_can_hide_and_restore_independent_workbench(qt_app, tmp_path):
         assert window.isHidden()
         assert not window._closed_event.is_set()
         assert send_lifecycle_command(server.config_path, "status") == {
-            "ok": True, "state": "running", "visible": False,
+            "ok": True,
+            "state": "running",
+            "visible": False,
         }
         assert send_lifecycle_command(server.config_path, "show")["ok"]
         qt_app.processEvents()
@@ -1247,9 +1464,7 @@ def test_agent_stream_updates_existing_message_card_in_place(
     card = window._message_cards[entry.entry_id]
 
     controller.handle_agent_update(
-        AgentProgressUpdate(
-            "job-1", "friend", "codex", "streaming", "正在流式输出"
-        )
+        AgentProgressUpdate("job-1", "friend", "codex", "streaming", "正在流式输出")
     )
     qt_app.processEvents()
 
@@ -1495,7 +1710,9 @@ async def test_message_content_is_rendered_as_plain_text(
     qt_app.processEvents()
 
     labels = window.findChildren(QLabel)
-    content_label = next(label for label in labels if label.text() == "<b>不是富文本</b>")
+    content_label = next(
+        label for label in labels if label.text() == "<b>不是富文本</b>"
+    )
     assert content_label.textFormat() == Qt.TextFormat.PlainText
     assert window.title_label.textFormat() == Qt.TextFormat.PlainText
     window.close()
@@ -1622,9 +1839,7 @@ def test_dragging_companion_moves_wechat_by_the_same_delta(
     probe.companion_hwnd = int(window.winId())
 
     window._begin_group_move()
-    window._move_wechat_with_companion(
-        WindowRect(-1940, 250, -1500, 1050)
-    )
+    window._move_wechat_with_companion(WindowRect(-1940, 250, -1500, 1050))
 
     assert mover.calls[-1][0] == 101
     geometry = mover.calls[-1][1]
@@ -1806,8 +2021,7 @@ def test_sender_waiting_status_and_delivery_badge_are_rendered(
 
     assert "等待你停止操作" in window.status_label.text()
     assert any(
-        "等待你停止操作" in label.text()
-        for label in window.findChildren(QLabel)
+        "等待你停止操作" in label.text() for label in window.findChildren(QLabel)
     )
     window.close()
     repository.close()

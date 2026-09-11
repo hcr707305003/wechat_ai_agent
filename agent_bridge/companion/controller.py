@@ -38,6 +38,8 @@ logger = logging.getLogger(__name__)
 
 MessageDispatcher = Callable[[UnifiedMessage], Awaitable[None]]
 HistoryLoader = Callable[[str, int], Awaitable[list[UnifiedMessage]]]
+HistoryPageLoader = Callable[[str, int, int], Awaitable[list[UnifiedMessage]]]
+HISTORY_PAGE_SIZE = 20
 UpdateSubscriber = Callable[[CompanionUpdate], None]
 DeliveryRetrier = Callable[[str], Awaitable[str]]
 DeliveryResender = Callable[[str], Awaitable[str]]
@@ -67,10 +69,17 @@ class CompanionController:
         queued_jobs_clearer: QueuedJobsClearer | None = None,
         context_observer: ContextObserver | None = None,
         available_providers: tuple[str, ...] | None = None,
+        history_page_loader: HistoryPageLoader | None = None,
+        history_message_loader: Callable[
+            [str, tuple[str, ...]], Awaitable[list[UnifiedMessage]]
+        ]
+        | None = None,
     ) -> None:
         self.repository = repository
         self.dispatcher = dispatcher
         self.history_loader = history_loader
+        self.history_page_loader = history_page_loader
+        self.history_message_loader = history_message_loader
         self.default_provider = default_provider
         self.available_providers = available_providers
         self._retry_delivery = retry_delivery
@@ -88,6 +97,11 @@ class CompanionController:
         self._local_history_loaded: set[str] = set()
         self._local_history_loading: set[str] = set()
         self._local_history_generation: dict[str, int] = defaultdict(int)
+        self._history_cursors: dict[str, tuple[str, int]] = {}
+        self._local_history_more: dict[str, bool] = defaultdict(lambda: True)
+        self._wechat_history_more: dict[str, bool] = defaultdict(bool)
+        self._wechat_history_offsets: dict[str, int] = defaultdict(int)
+        self._wechat_history_loading: set[str] = set()
         self._subscribers: list[UpdateSubscriber] = []
         self._delivery_entries: dict[str, tuple[str, int]] = {}
         self._delivery_states: dict[str, dict[str, str]] = defaultdict(dict)
@@ -154,10 +168,10 @@ class CompanionController:
             message.conversation_type == ConversationType.GROUP
             and not message.metadata.get("agent_triggered", False)
         ):
-            if (
-                self._context_observer is not None
-                and message.content_type in {ContentType.TEXT, ContentType.IMAGE}
-            ):
+            if self._context_observer is not None and message.content_type in {
+                ContentType.TEXT,
+                ContentType.IMAGE,
+            }:
                 await self._context_observer(message)
             return
         try:
@@ -206,14 +220,14 @@ class CompanionController:
                     delivery.conversation_id,
                     len(entries) - 1,
                 )
-                self._delivery_states[entries[-1].entry_id][delivery.id] = (
-                    update.state
-                )
+                self._delivery_states[entries[-1].entry_id][delivery.id] = update.state
             else:
                 conversation_id, index = location
                 entries = self._realtime[conversation_id]
                 updated_entry = self._updated_delivery_entry(
-                    entries[index], delivery.id, update.state,
+                    entries[index],
+                    delivery.id,
+                    update.state,
                     delivery.error_message or delivery.error_code or "",
                 )
                 if delivery.attachments:
@@ -401,36 +415,105 @@ class CompanionController:
         return updated
 
     async def load_history(self, item: ConversationItem) -> None:
+        await self._load_wechat_page(item, older=False)
+
+    async def _load_wechat_page(self, item: ConversationItem, *, older: bool) -> None:
         preferences = self.preferences(item)
-        if not preferences.load_history:
+        conversation_id = item.conversation_id
+        if (
+            not preferences.load_history
+            or conversation_id in self._wechat_history_loading
+        ):
             return
+        offset = self._wechat_history_offsets[conversation_id] if older else 0
+        limit = min(HISTORY_PAGE_SIZE, preferences.history_limit - offset)
+        if limit <= 0 or (older and not self._wechat_history_more[conversation_id]):
+            return
+        self._wechat_history_loading.add(conversation_id)
+        generation = self._local_history_generation[conversation_id]
         try:
-            messages = await self.history_loader(
-                item.conversation_id, preferences.history_limit
-            )
+            if self.history_page_loader:
+                messages = await self.history_page_loader(
+                    conversation_id, limit, offset
+                )
+            else:
+                messages = await self.history_loader(conversation_id, limit)
         except Exception as error:  # noqa: BLE001 - history failures are isolated to the UI
+            self._wechat_history_more[conversation_id] = bool(self.history_page_loader)
+            if older:
+                raise
             self.add_system_event(
                 item.conversation_id,
                 f"微信历史加载失败：{type(error).__name__}",
             )
             return
+        finally:
+            self._wechat_history_loading.discard(conversation_id)
         latest = self.preferences(item)
-        if not latest.load_history or latest.history_limit != preferences.history_limit:
+        if (
+            generation != self._local_history_generation[conversation_id]
+            or not latest.load_history
+            or latest.history_limit != preferences.history_limit
+        ):
             return
-        self._wechat_history[item.conversation_id] = [
+        entries = [
             self._timeline_entry(message, historical=True, history_source="wechat")
             for message in messages
         ]
-        self._notify("timeline", item.conversation_id, "history")
+        self._wechat_history[conversation_id] = (
+            entries + self._wechat_history[conversation_id] if older else entries
+        )
+        self._wechat_history_offsets[conversation_id] = offset + len(messages)
+        self._wechat_history_more[conversation_id] = bool(
+            self.history_page_loader
+            and len(messages) == limit
+            and offset + len(messages) < preferences.history_limit
+        )
+        if not older:
+            self._notify("timeline", conversation_id, "history")
+
+    def has_older_history(self, item: ConversationItem) -> bool:
+        return self._local_history_more[item.conversation_id] or (
+            self.preferences(item).load_history
+            and self._wechat_history_more[item.conversation_id]
+        )
+
+    def history_generation(self, item: ConversationItem) -> int:
+        """Token used to discard page/quote loads after history was cleared."""
+        return self._local_history_generation[item.conversation_id]
+
+    async def load_older_history(self, item: ConversationItem) -> None:
+        """Fetch at most one page per source; the view merges overlapping rows."""
+        if self._local_history_more[item.conversation_id]:
+            await self.load_local_history_async(item, older=True)
+        await self._load_wechat_page(item, older=True)
+
+    def _accept_local_page(
+        self, item: ConversationItem, rows: list[dict]
+    ) -> list[dict]:
+        conversation_id = item.conversation_id
+        self._local_history_more[conversation_id] = len(rows) > HISTORY_PAGE_SIZE
+        rows = rows[-HISTORY_PAGE_SIZE:]
+        if rows:
+            self._history_cursors[conversation_id] = (
+                str(rows[0]["created_at"]),
+                int(rows[0]["sequence"]),
+            )
+        return rows
 
     def load_local_history(self, item: ConversationItem) -> None:
         conversation_id = item.conversation_id
         if conversation_id in self._local_history_loaded:
             return
         session = self.repository.find_session_for_binding(*item.binding_key)
-        rows = self.repository.session_messages(session.id) if session else []
+        rows = (
+            self.repository.session_message_page(session.id, limit=21)
+            if session
+            else []
+        )
         if session is not None:
             rows = self._recover_sent_attachment_history(item, session.id, rows)
+        rows = self._accept_local_page(item, rows)
         self._local_history[conversation_id] = [
             entry
             for row in rows
@@ -439,13 +522,14 @@ class CompanionController:
         self._local_history_loaded.add(conversation_id)
         self._notify("timeline", conversation_id, "history")
 
-    async def load_local_history_async(self, item: ConversationItem) -> None:
+    async def load_local_history_async(
+        self, item: ConversationItem, *, older: bool = False
+    ) -> None:
         """Load local history without blocking the Qt event loop on startup."""
         conversation_id = item.conversation_id
         if (
-            conversation_id in self._local_history_loaded
-            or conversation_id in self._local_history_loading
-        ):
+            not older and conversation_id in self._local_history_loaded
+        ) or conversation_id in self._local_history_loading:
             return
         started = time.perf_counter()
         self._local_history_loading.add(conversation_id)
@@ -456,28 +540,41 @@ class CompanionController:
                 rows: list[dict[str, object]] = []
             else:
                 rows = await asyncio.to_thread(
-                    self.repository.session_messages, session.id
-                )
-                rows = await asyncio.to_thread(
-                    self._recover_sent_attachment_history,
-                    item,
+                    self.repository.session_message_page,
                     session.id,
-                    rows,
+                    before=self._history_cursors.get(conversation_id)
+                    if older
+                    else None,
+                    limit=HISTORY_PAGE_SIZE + 1,
                 )
-            recovered_media = await self._recover_legacy_wechat_media(item, rows)
+                if not older:
+                    rows = await asyncio.to_thread(
+                        self._recover_sent_attachment_history,
+                        item,
+                        session.id,
+                        rows,
+                    )
             if generation != self._local_history_generation[conversation_id]:
                 return
+            page_rows = rows[-HISTORY_PAGE_SIZE:]
+            recovered_media = await self._recover_legacy_wechat_media(item, page_rows)
+            if generation != self._local_history_generation[conversation_id]:
+                return
+            rows = self._accept_local_page(item, rows)
             entries = [
                 entry
                 for row in rows
                 if (entry := self._local_timeline_entry(item, row)) is not None
             ]
-            self._local_history[conversation_id] = [
-                self._merge_recovered_media(entry, recovered_media)
-                for entry in entries
+            page = [
+                self._merge_recovered_media(entry, recovered_media) for entry in entries
             ]
+            self._local_history[conversation_id] = (
+                page + self._local_history[conversation_id] if older else page
+            )
             self._local_history_loaded.add(conversation_id)
-            self._notify("timeline", conversation_id, "history")
+            if not older:
+                self._notify("timeline", conversation_id, "history")
             logger.info(
                 "工作台启动计时: 本地历史 loaded conversation=%s count=%d elapsed=%.3fs",
                 conversation_id,
@@ -498,10 +595,17 @@ class CompanionController:
         ):
             return {}
         try:
-            messages = await self.history_loader(
-                item.conversation_id,
-                self.preferences(item).history_limit,
-            )
+            if self.history_message_loader:
+                ids = tuple(
+                    str(row["channel_message_id"])
+                    for row in rows
+                    if row.get("channel_message_id") and self._is_legacy_image_row(row)
+                )
+                messages = await self.history_message_loader(item.conversation_id, ids)
+            else:
+                messages = await self.history_loader(
+                    item.conversation_id, HISTORY_PAGE_SIZE
+                )
         except Exception as error:  # noqa: BLE001 - media recovery is best effort
             logger.debug(
                 "工作台旧图片恢复失败: conversation=%s error=%s",
@@ -574,14 +678,24 @@ class CompanionController:
         }
         recovered = False
         for delivery in deliveries:
-            if delivery.status != OutboundDeliveryStatus.SENT or not delivery.attachments:
+            if (
+                delivery.status != OutboundDeliveryStatus.SENT
+                or not delivery.attachments
+            ):
                 continue
             paths = {
                 str(attachment.path)
                 for attachment in delivery.attachments
                 if attachment.path
             }
-            if not paths or paths.issubset(represented_paths):
+            if (
+                not paths
+                or paths.issubset(represented_paths)
+                or all(
+                    self.repository.has_attachment_history(session_id, path)
+                    for path in paths
+                )
+            ):
                 continue
             self.repository.add_event(
                 session_id,
@@ -618,13 +732,19 @@ class CompanionController:
             )
             represented_paths.update(paths)
             recovered = True
-        return self.repository.session_messages(session_id) if recovered else rows
+        return (
+            self.repository.session_message_page(session_id, limit=21)
+            if recovered
+            else rows
+        )
 
     def clear_local_messages(self, item: ConversationItem) -> int:
         session = self.repository.find_session_for_binding(*item.binding_key)
         removed = self.repository.clear_session_messages(session.id) if session else 0
         conversation_id = item.conversation_id
         self._local_history_generation[conversation_id] += 1
+        self._history_cursors.pop(conversation_id, None)
+        self._local_history_more[conversation_id] = False
         cleared_entry_ids = {
             entry.entry_id for entry in self._realtime.get(conversation_id, ())
         }
@@ -771,8 +891,7 @@ class CompanionController:
                 continue
             if delivery.content_type == ContentType.IMAGE:
                 matches = message.content_type == ContentType.IMAGE or (
-                    bool(delivery.text.strip())
-                    and message.content == delivery.text
+                    bool(delivery.text.strip()) and message.content == delivery.text
                 )
             else:
                 matches = message.content == delivery.text
@@ -813,7 +932,9 @@ class CompanionController:
             status_detail=(
                 detail
                 if state in failure_states
-                else entry.status_detail if aggregate in failure_states else ""
+                else entry.status_detail
+                if aggregate in failure_states
+                else ""
             ),
         )
 
@@ -831,9 +952,7 @@ class CompanionController:
         )
 
     @classmethod
-    def _aggregate_delivery_status(
-        cls, states: tuple[str, ...], expected: int
-    ) -> str:
+    def _aggregate_delivery_status(cls, states: tuple[str, ...], expected: int) -> str:
         for failure in (
             "failed",
             "expired",
@@ -845,8 +964,10 @@ class CompanionController:
             if failure in states:
                 return failure
         sent_states = {"sent", "foreground_sent"}
-        if len(states) >= expected and states and all(
-            state in sent_states for state in states
+        if (
+            len(states) >= expected
+            and states
+            and all(state in sent_states for state in states)
         ):
             return "sent"
         for active in (
@@ -864,8 +985,10 @@ class CompanionController:
         return session.current_provider if session else self.default_provider
 
     def provider_available(self, item: ConversationItem) -> bool:
-        return (self.available_providers is None
-                or self.current_provider(item) in self.available_providers)
+        return (
+            self.available_providers is None
+            or self.current_provider(item) in self.available_providers
+        )
 
     def current_session_status(self, item: ConversationItem) -> str:
         session = self.repository.find_session_for_binding(*item.binding_key)
@@ -904,6 +1027,11 @@ class CompanionController:
             created_at=message.created_at,
             historical=historical,
             history_source=history_source,
+            **(
+                {"entry_id": f"history:{message.channel}:{message.message_id}"}
+                if historical and message.message_id
+                else {}
+            ),
             attachments=message.attachments,
             quote=CompanionController._quote_preview(
                 message.metadata.get(QUOTE_METADATA_KEY),
@@ -976,6 +1104,7 @@ class CompanionController:
             created_at=created_at,
             historical=True,
             history_source="local",
+            **({"entry_id": f"local:{row['id']}"} if row.get("id") else {}),
             attachments=attachments,
             quote=CompanionController._quote_preview(
                 metadata.get(QUOTE_METADATA_KEY) or legacy_quote,

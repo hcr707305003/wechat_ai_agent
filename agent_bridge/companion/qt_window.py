@@ -16,6 +16,7 @@ from PySide6.QtCore import (
     QEasingCurve,
     QEvent,
     QObject,
+    QPoint,
     QPointF,
     QPropertyAnimation,
     QRectF,
@@ -94,9 +95,7 @@ _HTBOTTOMLEFT = 16
 _HTBOTTOMRIGHT = 17
 
 
-def calculate_resize_hit(
-    rect: WindowRect, x: int, y: int, border: int
-) -> int | None:
+def calculate_resize_hit(rect: WindowRect, x: int, y: int, border: int) -> int | None:
     """Return the Win32 resize hit code for a screen point."""
     border = max(1, border)
     left = rect.left <= x < rect.left + border
@@ -150,9 +149,7 @@ class CompanionLauncher(QPushButton):
         self._open_workbench = open_workbench
         self._allow_close = False
         self.setObjectName("companionLauncher")
-        self.setWindowFlags(
-            Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
-        )
+        self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setFixedSize(44, 44)
         self.setToolTip("打开 Agent 工作台")
@@ -251,9 +248,7 @@ class AnimatedSwitch(QCheckBox):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         position = self._knob_position
         track_color = _mix_color(self._off_color, self._on_color, position)
-        border_color = _mix_color(
-            self._border_color, self._on_color, position
-        )
+        border_color = _mix_color(self._border_color, self._on_color, position)
         knob_color = QColor(self._knob_color)
         if self.underMouse() and self.isEnabled():
             track_color = track_color.lighter(106)
@@ -415,9 +410,7 @@ class WeChatCompanionWindow(QMainWindow):
         mover: Win32WindowMover | None = None,
         owner: Win32WindowOwner | None = None,
         avatar_cache: AvatarCache | None = None,
-        conversation_loader: Callable[
-            [], Awaitable[list[ConversationItem]]
-        ]
+        conversation_loader: Callable[[], Awaitable[list[ConversationItem]]]
         | None = None,
     ) -> None:
         super().__init__()
@@ -456,6 +449,12 @@ class WeChatCompanionWindow(QMainWindow):
         self._avatar_tasks: set[asyncio.Task[None]] = set()
         self._profile_refresh_task: asyncio.Task[None] | None = None
         self._message_cards: dict[str, MessageCard] = {}
+        self._displayed_timeline_entries: dict[str, TimelineEntry] = {}
+        self._history_visible_count = 20
+        self._timeline_render_generation = 0
+        self._history_page_task: asyncio.Task | None = None
+        self._history_focus_end: str | None = None
+        self._known_timeline_ids: set[str] = set()
         self._timeline_entries: dict[str, TimelineEntry] = {}
         self._pending_timeline_updates: dict[str, int] = {}
         self._programmatic_timeline_scroll = False
@@ -500,7 +499,10 @@ class WeChatCompanionWindow(QMainWindow):
         show_started = time.perf_counter()
         self._show_started_at = show_started
         self.show()
-        logger.info("工作台启动计时: window.show returned elapsed=%.3fs", time.perf_counter() - show_started)
+        logger.info(
+            "工作台启动计时: window.show returned elapsed=%.3fs",
+            time.perf_counter() - show_started,
+        )
         QTimer.singleShot(0, self._log_first_paint)
         self._follow_wechat_window()
         self._schedule_all_avatar_refreshes()
@@ -544,9 +546,7 @@ class WeChatCompanionWindow(QMainWindow):
         before = self.avatar_cache.cached_path(item)
         before_stamp = _path_stamp(before)
         path = await self.avatar_cache.ensure(item)
-        if path is not None and (
-            before is None or _path_stamp(path) != before_stamp
-        ):
+        if path is not None and (before is None or _path_stamp(path) != before_stamp):
             self._signal_bus.avatar_updated.emit(item.binding_key)
 
     def _handle_avatar_updated(self, binding_key: tuple[str, str, str]) -> None:
@@ -609,6 +609,8 @@ class WeChatCompanionWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self.launcher.shutdown()
+        if self._history_page_task is not None:
+            self._history_page_task.cancel()
         if self.settings.mode == "independent":
             try:
                 self.save_geometry(self._current_geometry())
@@ -838,6 +840,15 @@ class WeChatCompanionWindow(QMainWindow):
         self.new_messages_button.clicked.connect(self._flush_pending_timeline)
         self.new_messages_button.hide()
         main_layout.addWidget(self.new_messages_button)
+        self.history_page_button = QPushButton("向上滚动加载更早消息 · 每页 20 条")
+        self.history_page_button.setObjectName("newMessagesBanner")
+        self.history_page_button.setAccessibleName("加载更早的20条历史消息")
+        self.history_page_button.clicked.connect(self._request_older_history)
+        main_layout.addWidget(self.history_page_button)
+        self.history_latest_button = QPushButton("回到最新消息")
+        self.history_latest_button.clicked.connect(self._return_to_latest)
+        self.history_latest_button.hide()
+        main_layout.addWidget(self.history_latest_button)
         main_layout.addWidget(self.timeline_scroll, 1)
         outer.addWidget(main, 1)
 
@@ -921,9 +932,7 @@ class WeChatCompanionWindow(QMainWindow):
         header.addWidget(close_button)
         layout.addLayout(header)
 
-        hint = QLabel(
-            "会话选项只作用于当前聊天；前台备用发送作用于当前微信账号。"
-        )
+        hint = QLabel("会话选项只作用于当前聊天；前台备用发送作用于当前微信账号。")
         hint.setObjectName("mutedLabel")
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -944,17 +953,17 @@ class WeChatCompanionWindow(QMainWindow):
         layout.addWidget(self.settings_image_switch)
         layout.addWidget(self.settings_history_switch)
 
-        limit_label = QLabel("历史消息条数")
+        limit_label = QLabel("微信历史加载上限")
         limit_label.setObjectName("sectionLabel")
         self.history_limit = QSpinBox()
         self.history_limit.setRange(1, 500)
-        self.history_limit.setAccessibleName("历史消息条数")
+        self.history_limit.setAccessibleName("微信历史加载上限")
         self.history_limit.editingFinished.connect(self._history_limit_changed)
         layout.addWidget(limit_label)
         layout.addWidget(self.history_limit)
 
         local_history_hint = QLabel(
-            "Agent 数据库历史会始终加载，不受微信历史开关影响。"
+            "每页加载 20 条，向上滚动查看更早消息。Agent 数据库历史不受微信历史开关和上限影响。"
         )
         local_history_hint.setObjectName("mutedLabel")
         local_history_hint.setWordWrap(True)
@@ -990,7 +999,9 @@ class WeChatCompanionWindow(QMainWindow):
         layout.addWidget(fallback_hint)
         layout.addStretch(1)
 
-        safety = QLabel("回复默认关闭。开启后，之后收到的消息才会进入对应 Agent Session。")
+        safety = QLabel(
+            "回复默认关闭。开启后，之后收到的消息才会进入对应 Agent Session。"
+        )
         safety.setObjectName("mutedLabel")
         safety.setWordWrap(True)
         layout.addWidget(safety)
@@ -1041,6 +1052,12 @@ class WeChatCompanionWindow(QMainWindow):
         if not 0 <= index < len(self.conversations):
             return
         self._selected_index = index
+        self._history_visible_count = 20
+        self._history_focus_end = None
+        self._known_timeline_ids.clear()
+        if self._history_page_task is not None:
+            self._history_page_task.cancel()
+            self._history_page_task = None
         item = self.conversations[index]
         self._unread.discard(item.conversation_id)
         self._pending_timeline_updates.pop(item.conversation_id, None)
@@ -1078,9 +1095,14 @@ class WeChatCompanionWindow(QMainWindow):
         self.provider_badge.setText(provider.upper())
         available = self.controller.provider_available(item)
         self.provider_badge.setEnabled(available)
-        self.provider_badge.setStyleSheet("" if available else "color: #64748B; background: #E2E8F0;")
-        self.provider_badge.setToolTip("" if available else
-                                      "此 Agent 未启用或本地依赖不可用；原 session 保留，不自动切换。")
+        self.provider_badge.setStyleSheet(
+            "" if available else "color: #64748B; background: #E2E8F0;"
+        )
+        self.provider_badge.setToolTip(
+            ""
+            if available
+            else "此 Agent 未启用或本地依赖不可用；原 session 保留，不自动切换。"
+        )
         self.provider_badge.show()
         self.reply_switch.setEnabled(available)
         self.settings_reply_switch.setEnabled(available)
@@ -1178,9 +1200,7 @@ class WeChatCompanionWindow(QMainWindow):
         conversation_id = self._queue_conversation_id()
         if conversation_id is None:
             return
-        task = asyncio.create_task(
-            self.controller.clear_queued_jobs(conversation_id)
-        )
+        task = asyncio.create_task(self.controller.clear_queued_jobs(conversation_id))
         task.add_done_callback(self._queue_operation_finished)
 
     def _queue_operation_finished(self, task: asyncio.Task[object]) -> None:
@@ -1197,12 +1217,31 @@ class WeChatCompanionWindow(QMainWindow):
         *,
         scroll_to_bottom: bool = True,
     ) -> None:
+        self._timeline_render_generation += 1
+        render_generation = self._timeline_render_generation
+        _bar_signal_blocker = QSignalBlocker(self.timeline_scroll.verticalScrollBar())
+        known_entries = entries
+        if self._history_focus_end:
+            end = next((i + 1 for i, entry in enumerate(entries)
+                        if entry.entry_id == self._history_focus_end), len(entries))
+            known_entries = entries[:end] + tuple(entry for entry in entries[end:]
+                                                  if entry.history_source is not None)
+        self._known_timeline_ids = {entry.entry_id for entry in known_entries}
+        entries = self._visible_history_entries(entries)
+        self._update_history_controls()
         if scroll_to_bottom:
             self._timeline_follow_bottom = True
         else:
             self._cancel_timeline_bottom_follow()
         previous_scroll_value = self.timeline_scroll.verticalScrollBar().value()
-        _clear_layout(self.timeline_layout)
+        previous_entries = self._displayed_timeline_entries
+        self._displayed_timeline_entries = {}
+        reusable = {
+            entry.entry_id: self._message_cards[entry.entry_id]
+            for entry in entries
+            if entry.entry_id in self._message_cards
+        }
+        _clear_layout(self.timeline_layout, keep=set(reusable.values()))
         self._message_cards.clear()
         self._timeline_entries = {entry.entry_id: entry for entry in entries}
 
@@ -1236,27 +1275,12 @@ class WeChatCompanionWindow(QMainWindow):
             previous_source = source
             row = QHBoxLayout()
             display_entry = self._display_timeline_entry(entry)
-            card = MessageCard(
-                display_entry,
-                lambda delivery_id: asyncio.create_task(
-                    self.controller.retry_delivery(delivery_id)
-                ),
-                lambda delivery_id: asyncio.create_task(
-                    self.controller.cancel_delivery(delivery_id)
-                ),
-                lambda delivery_id: asyncio.create_task(
-                    self.controller.resend_delivery(delivery_id)
-                ),
-                lambda conversation_id=entry.conversation_id: self._image_gallery(
-                    conversation_id
-                ),
-            )
-            card.typing_advanced.connect(
-                lambda conversation_id=entry.conversation_id: self._typing_advanced(
-                    conversation_id
-                )
-            )
-            card.quote_requested.connect(self._jump_to_quoted_message)
+            card = reusable.get(entry.entry_id)
+            if card is None:
+                card = self._create_message_card(entry, display_entry)
+            elif previous_entries.get(entry.entry_id) != display_entry:
+                card.update_entry(display_entry)
+            self._displayed_timeline_entries[entry.entry_id] = display_entry
             self._message_cards[entry.entry_id] = card
             if entry.direction == "outbound":
                 row.addStretch(1)
@@ -1269,23 +1293,192 @@ class WeChatCompanionWindow(QMainWindow):
             self.timeline_layout.addLayout(row)
         self.timeline_layout.addStretch(1)
         self._constrain_message_cards()
-        # A native dock move can resize the top-level window after this render
-        # without delivering a Qt resize event before the cards are laid out.
-        # Re-constrain once the event loop has applied the new viewport width.
         QTimer.singleShot(0, self._constrain_message_cards)
         if scroll_to_bottom:
-            # Move immediately using the current range, then repeat after Qt
-            # has recalculated the newly selected conversation's layout.
             self._scroll_to_bottom(complete_schedule=False)
             self._schedule_scroll_to_bottom()
         else:
             QTimer.singleShot(
                 0,
-                lambda value=previous_scroll_value: self._restore_timeline_scroll(
-                    value
+                lambda value=previous_scroll_value: self._restore_render_scroll(
+                    value, render_generation
                 ),
             )
         self._update_new_messages_banner()
+
+    def _restore_render_scroll(self, value: int, generation: int) -> None:
+        if (
+            generation == self._timeline_render_generation
+            and not self._closed_event.is_set()
+        ):
+            self._restore_timeline_scroll(value)
+
+    def _create_message_card(
+        self, entry: TimelineEntry, display_entry: TimelineEntry
+    ) -> MessageCard:
+        card = MessageCard(
+            display_entry,
+            lambda delivery_id: asyncio.create_task(
+                self.controller.retry_delivery(delivery_id)
+            ),
+            lambda delivery_id: asyncio.create_task(
+                self.controller.cancel_delivery(delivery_id)
+            ),
+            lambda delivery_id: asyncio.create_task(
+                self.controller.resend_delivery(delivery_id)
+            ),
+            lambda conversation_id=entry.conversation_id: self._image_gallery(
+                conversation_id
+            ),
+        )
+        card.typing_advanced.connect(
+            lambda conversation_id=entry.conversation_id: self._typing_advanced(
+                conversation_id
+            )
+        )
+        card.quote_requested.connect(self._jump_to_quoted_message)
+        return card
+
+    def _visible_history_entries(
+        self, entries: tuple[TimelineEntry, ...]
+    ) -> tuple[TimelineEntry, ...]:
+        if self._history_focus_end:
+            end = next(
+                (
+                    i + 1
+                    for i, entry in enumerate(entries)
+                    if entry.entry_id == self._history_focus_end
+                ),
+                len(entries),
+            )
+            entries = entries[:end]
+        return entries[-self._history_visible_count :]
+
+    def _has_hidden_history(self, item: ConversationItem) -> bool:
+        entries = self.controller.timeline(item.conversation_id)
+        visible = self._visible_history_entries(entries)
+        return bool(visible and entries and visible[0].entry_id != entries[0].entry_id)
+
+    def _update_history_controls(self) -> None:
+        item = self._selected_item()
+        loading = (
+            self._history_page_task is not None and not self._history_page_task.done()
+        )
+        more = bool(
+            item
+            and (
+                self._has_hidden_history(item)
+                or self.controller.has_older_history(item)
+            )
+        )
+        self.history_page_button.setText(
+            "正在加载历史消息…"
+            if loading
+            else "向上滚动加载更早消息 · 每页 20 条"
+            if more
+            else "已无更早消息"
+        )
+        self.history_page_button.setEnabled(more and not loading)
+        self.history_latest_button.setVisible(self._history_focus_end is not None)
+
+    def _request_older_history(self) -> None:
+        item = self._selected_item()
+        if item is None or (
+            self._history_page_task and not self._history_page_task.done()
+        ):
+            return
+        if not self._has_hidden_history(item) and not self.controller.has_older_history(
+            item
+        ):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._history_page_task = loop.create_task(self._prepend_history_page(item))
+        self._update_history_controls()
+
+    async def _prepend_history_page(self, item: ConversationItem) -> None:
+        self._cancel_timeline_bottom_follow()
+        generation = self.controller.history_generation(item)
+        try:
+            # Both sources must advance: cached local rows must not leap over
+            # a not-yet-read, newer native WeChat page.
+            if self.controller.has_older_history(item):
+                await self.controller.load_older_history(item)
+            if (
+                self._selected_item() != item
+                or generation != self.controller.history_generation(item)
+            ):
+                return
+            anchor = self._capture_history_anchor()
+            self._history_visible_count += 20
+            if (
+                self._pending_timeline_updates.get(item.conversation_id)
+                and self._message_cards
+            ):
+                self._history_focus_end = next(reversed(self._message_cards))
+            self._render_selected(scroll_to_bottom=False)
+            if anchor:
+                render_generation = self._timeline_render_generation
+                QTimer.singleShot(
+                    0,
+                    lambda: self._restore_history_anchor(
+                        item, anchor, render_generation
+                    ),
+                )
+        except Exception as error:  # noqa: BLE001 - retry stays available on this page
+            logger.warning(
+                "工作台历史翻页失败: conversation=%s error=%s",
+                item.conversation_id,
+                type(error).__name__,
+            )
+            self._set_status(
+                "历史加载失败，请点击上方重试", state="warning", sticky_seconds=4
+            )
+        finally:
+            if self._history_page_task is asyncio.current_task():
+                self._history_page_task = None
+                self._update_history_controls()
+
+    def _capture_history_anchor(self) -> tuple[str, int] | None:
+        viewport = self.timeline_scroll.viewport()
+        return next(
+            (
+                (entry_id, card.mapTo(viewport, QPoint()).y())
+                for entry_id, card in self._message_cards.items()
+                if card.mapTo(viewport, QPoint()).y() + card.height() > 0
+            ),
+            None,
+        )
+
+    def _restore_history_anchor(
+        self, item: ConversationItem, anchor: tuple[str, int], generation: int
+    ) -> None:
+        if (
+            self._selected_item() != item
+            or generation != self._timeline_render_generation
+            or self._closed_event.is_set()
+        ):
+            return
+        card = self._message_cards.get(anchor[0])
+        if card is not None:
+            self._constrain_message_cards()
+            offset = card.mapTo(self.timeline_scroll.viewport(), QPoint()).y()
+            self._restore_timeline_scroll(
+                self.timeline_scroll.verticalScrollBar().value() + offset - anchor[1]
+            )
+
+    def _return_to_latest(self) -> None:
+        if self._history_page_task:
+            self._history_page_task.cancel()
+            self._history_page_task = None
+        self._history_focus_end = None
+        self._history_visible_count = 20
+        item = self._selected_item()
+        if item:
+            self._pending_timeline_updates.pop(item.conversation_id, None)
+        self._render_selected(scroll_to_bottom=True)
 
     def _image_gallery(self, conversation_id: str) -> tuple[tuple[str, str], ...]:
         """Return all local conversation images for the viewer's prev/next controls."""
@@ -1294,11 +1487,7 @@ class WeChatCompanionWindow(QMainWindow):
             for attachment in entry.attachments:
                 if attachment.kind != "image" or not attachment.path:
                     continue
-                label = str(
-                    attachment.metadata.get("alt")
-                    or attachment.name
-                    or "图片"
-                )
+                label = str(attachment.metadata.get("alt") or attachment.name or "图片")
                 gallery.append((label, str(attachment.path)))
         return tuple(gallery)
 
@@ -1332,13 +1521,39 @@ class WeChatCompanionWindow(QMainWindow):
         source = self._timeline_entries.get(entry_id)
         if source is None or source.quote is None:
             return
+        target = self._find_quote_target(source, tuple(self._timeline_entries.values()))
+        if target is not None:
+            self._show_quote_target(target)
+            return
+        item = self._selected_item()
+        if item is not None and not (
+            self._history_page_task and not self._history_page_task.done()
+        ):
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+            else:
+                self._history_page_task = loop.create_task(
+                    self._load_quote_target(item, source)
+                )
+                self._update_history_controls()
+                return
+        self._set_status("原消息已不在当前历史中", state="warning", sticky_seconds=3)
+
+    @staticmethod
+    def _find_quote_target(
+        source: TimelineEntry, entries: tuple[TimelineEntry, ...]
+    ) -> TimelineEntry | None:
         quote = source.quote
+        if quote is None:
+            return None
         target = None
         if quote.target_source_key:
             target = next(
                 (
                     entry
-                    for entry in self._timeline_entries.values()
+                    for entry in entries
                     if entry.source_key == quote.target_source_key
                 ),
                 None,
@@ -1346,7 +1561,7 @@ class WeChatCompanionWindow(QMainWindow):
         if target is None and quote.target_created_at is not None:
             candidates = [
                 entry
-                for entry in self._timeline_entries.values()
+                for entry in entries
                 if entry.entry_id != source.entry_id
                 and int(entry.created_at.timestamp())
                 == int(quote.target_created_at.timestamp())
@@ -1360,6 +1575,52 @@ class WeChatCompanionWindow(QMainWindow):
                 ]
                 candidates = named if len(named) == 1 else []
             target = candidates[0] if len(candidates) == 1 else None
+        return target
+
+    async def _load_quote_target(
+        self, item: ConversationItem, source: TimelineEntry
+    ) -> None:
+        generation = self.controller.history_generation(item)
+        try:
+            while (
+                self._selected_item() == item
+                and generation == self.controller.history_generation(item)
+            ):
+                entries = self.controller.timeline(item.conversation_id)
+                target = self._find_quote_target(source, entries)
+                if target is not None:
+                    self._history_focus_end = target.entry_id
+                    self._history_visible_count = 20
+                    self._render_selected(scroll_to_bottom=False)
+                    QTimer.singleShot(
+                        0, lambda target=target: self._show_quote_target(target)
+                    )
+                    return
+                if not self.controller.has_older_history(item):
+                    break
+                before = tuple(entry.entry_id for entry in entries)
+                await self.controller.load_older_history(item)
+                # A concurrent initial load or unavailable native source must not spin.
+                if before == tuple(
+                    entry.entry_id
+                    for entry in self.controller.timeline(item.conversation_id)
+                ):
+                    break
+            if self._selected_item() == item:
+                self._set_status(
+                    "原消息已不在当前历史中", state="warning", sticky_seconds=3
+                )
+        except Exception as error:  # noqa: BLE001 - quote navigation is display-only
+            logger.warning("工作台引用定位失败: error=%s", type(error).__name__)
+            self._set_status(
+                "原消息加载失败，请重试", state="warning", sticky_seconds=3
+            )
+        finally:
+            if self._history_page_task is asyncio.current_task():
+                self._history_page_task = None
+                self._update_history_controls()
+
+    def _show_quote_target(self, target: TimelineEntry) -> None:
         card = self._message_cards.get(target.entry_id) if target is not None else None
         if card is None:
             self._set_status(
@@ -1408,7 +1669,7 @@ class WeChatCompanionWindow(QMainWindow):
 
     def _timeline_is_at_bottom(self) -> bool:
         bar = self.timeline_scroll.verticalScrollBar()
-        return bar.maximum() - bar.value() <= 8
+        return self._history_focus_end is None and bar.maximum() - bar.value() <= 8
 
     def _timeline_scroll_changed(self, _value: int) -> None:
         if self._programmatic_timeline_scroll:
@@ -1418,13 +1679,26 @@ class WeChatCompanionWindow(QMainWindow):
             return
         if self._timeline_force_bottom_pending:
             return
-        if self._timeline_is_at_bottom():
+        if (
+            self.timeline_scroll.verticalScrollBar().maximum()
+            - self.timeline_scroll.verticalScrollBar().value()
+            <= 8
+        ):
             self._flush_pending_timeline()
         else:
             self._timeline_scroll_schedule_generation += 1
 
     def _timeline_user_scrolled(self, _value: int) -> None:
         self._cancel_timeline_bottom_follow()
+        QTimer.singleShot(0, self._load_history_if_at_top)
+
+    def _load_history_if_at_top(self) -> None:
+        if (
+            not self._programmatic_timeline_scroll
+            and not self._timeline_follow_bottom
+            and self.timeline_scroll.verticalScrollBar().value() <= 2
+        ):
+            self._request_older_history()
 
     def _cancel_timeline_bottom_follow(self) -> None:
         self._timeline_follow_bottom = False
@@ -1451,8 +1725,8 @@ class WeChatCompanionWindow(QMainWindow):
         for delay in (0, 50, 150):
             QTimer.singleShot(
                 delay,
-                lambda generation=generation, delay=delay: self._run_scheduled_bottom_scroll(
-                    generation, delay
+                lambda generation=generation, delay=delay: (
+                    self._run_scheduled_bottom_scroll(generation, delay)
                 ),
             )
 
@@ -1465,12 +1739,10 @@ class WeChatCompanionWindow(QMainWindow):
 
     def _mark_pending_timeline(self, conversation_id: str) -> None:
         entries = self.controller.timeline(conversation_id)
-        visible_ids = set(self._message_cards)
+        visible_ids = self._known_timeline_ids
         new_entries = sum(entry.entry_id not in visible_ids for entry in entries)
         current = self._pending_timeline_updates.get(conversation_id, 0)
-        self._pending_timeline_updates[conversation_id] = max(
-            current, new_entries, 1
-        )
+        self._pending_timeline_updates[conversation_id] = max(current, new_entries, 1)
         self._update_new_messages_banner()
 
     def _update_new_messages_banner(self) -> None:
@@ -1492,20 +1764,25 @@ class WeChatCompanionWindow(QMainWindow):
             return
         if not self._pending_timeline_updates.get(item.conversation_id):
             return
+        if self._history_page_task:
+            self._history_page_task.cancel()
+            self._history_page_task = None
         self._pending_timeline_updates.pop(item.conversation_id, None)
+        self._history_focus_end = None
         self._render_selected(scroll_to_bottom=True)
 
-    def _update_timeline_in_place(
-        self, entries: tuple[TimelineEntry, ...]
-    ) -> bool:
+    def _update_timeline_in_place(self, entries: tuple[TimelineEntry, ...]) -> bool:
+        self._known_timeline_ids = {entry.entry_id for entry in entries}
+        entries = self._visible_history_entries(entries)
         entry_ids = tuple(entry.entry_id for entry in entries)
         if tuple(self._message_cards) != entry_ids:
             return False
         self._timeline_entries = {entry.entry_id: entry for entry in entries}
         for entry in entries:
-            self._message_cards[entry.entry_id].update_entry(
-                self._display_timeline_entry(entry)
-            )
+            display_entry = self._display_timeline_entry(entry)
+            if self._displayed_timeline_entries.get(entry.entry_id) != display_entry:
+                self._message_cards[entry.entry_id].update_entry(display_entry)
+                self._displayed_timeline_entries[entry.entry_id] = display_entry
         self._schedule_scroll_to_bottom()
         return True
 
@@ -1546,6 +1823,11 @@ class WeChatCompanionWindow(QMainWindow):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
+        if self._history_page_task:
+            self._history_page_task.cancel()
+            self._history_page_task = None
+        self._history_visible_count = 20
+        self._history_focus_end = None
         try:
             removed = self.controller.clear_local_messages(item)
         except (OSError, RuntimeError, KeyError, TypeError, ValueError) as error:
@@ -1689,24 +1971,40 @@ class WeChatCompanionWindow(QMainWindow):
             )
             self._refresh_conversation_row(index)
         if selected and update.conversation_id == selected.conversation_id:
-            if update.kind == "timeline" and update.detail != "history":
-                if not self._timeline_is_at_bottom():
-                    self._mark_pending_timeline(selected.conversation_id)
-                    return
+            if (
+                update.kind == "timeline"
+                and update.detail != "history"
+                and not self._timeline_is_at_bottom()
+            ):
+                self._mark_pending_timeline(selected.conversation_id)
+                return
             if update.kind == "timeline" and update.detail == "history":
-                self._pending_timeline_updates.pop(
-                    selected.conversation_id, None
-                )
+                if self._message_cards and not self._timeline_follow_bottom:
+                    anchor_id, anchor_card = next(iter(self._message_cards.items()))
+                    anchor = (
+                        anchor_id,
+                        anchor_card.mapTo(
+                            self.timeline_scroll.viewport(), QPoint()
+                        ).y(),
+                    )
+                    if self._pending_timeline_updates.get(selected.conversation_id):
+                        self._history_focus_end = next(reversed(self._message_cards))
+                    self._render_selected(scroll_to_bottom=False)
+                    generation = self._timeline_render_generation
+                    QTimer.singleShot(
+                        0,
+                        lambda: self._restore_history_anchor(
+                            selected, anchor, generation
+                        ),
+                    )
+                    return
+                self._pending_timeline_updates.pop(selected.conversation_id, None)
                 self._update_new_messages_banner()
             entries = self.controller.timeline(selected.conversation_id)
-            if (
-                update.kind != "timeline"
-                or not self._update_timeline_in_place(entries)
-            ):
+            if update.kind != "timeline" or not self._update_timeline_in_place(entries):
                 self._render_selected(
                     scroll_to_bottom=(
-                        update.kind == "timeline"
-                        or self._timeline_is_at_bottom()
+                        update.kind == "timeline" or self._timeline_is_at_bottom()
                     )
                 )
 
@@ -1719,9 +2017,7 @@ class WeChatCompanionWindow(QMainWindow):
             )
             self.app_title.setText("AI" if compact else "Agent 工作台")
             self.app_title.setAlignment(
-                Qt.AlignmentFlag.AlignCenter
-                if compact
-                else Qt.AlignmentFlag.AlignLeft
+                Qt.AlignmentFlag.AlignCenter if compact else Qt.AlignmentFlag.AlignLeft
             )
             self.section_label.setVisible(not compact)
             self._refresh_conversation_list()
@@ -1735,9 +2031,7 @@ class WeChatCompanionWindow(QMainWindow):
             self.settings_panel.setFixedWidth(270)
 
     def _apply_theme(self) -> None:
-        system_dark = (
-            self._app.styleHints().colorScheme() == Qt.ColorScheme.Dark
-        )
+        system_dark = self._app.styleHints().colorScheme() == Qt.ColorScheme.Dark
         palette = resolve_theme(self.settings.theme, system_dark=system_dark)
         self._app.setStyleSheet(build_stylesheet(palette))
         self.reply_switch.set_theme_colors(
@@ -1814,9 +2108,7 @@ class WeChatCompanionWindow(QMainWindow):
             self.launcher.show()
         launcher_handle = int(self.launcher.winId())
         self._bind_to_wechat(launcher_handle, int(wechat_handle or 0))
-        geometry = calculate_launcher_geometry(
-            snapshot.client_rect or snapshot.rect
-        )
+        geometry = calculate_launcher_geometry(snapshot.client_rect or snapshot.rect)
         geometry_key = (
             f"{geometry.width}x{geometry.height}{geometry.x:+d}{geometry.y:+d}"
         )
@@ -1961,22 +2253,23 @@ class WeChatCompanionWindow(QMainWindow):
     def _current_geometry(self) -> str:
         geometry = self.geometry()
         return (
-            f"{geometry.width()}x{geometry.height()}"
-            f"{geometry.x():+d}{geometry.y():+d}"
+            f"{geometry.width()}x{geometry.height()}{geometry.x():+d}{geometry.y():+d}"
         )
 
 
-def _clear_layout(layout) -> None:
+def _clear_layout(layout, *, keep: set | None = None) -> None:
     while layout.count():
         layout_item = layout.takeAt(0)
         widget = layout_item.widget()
         if widget is not None:
+            if keep and widget in keep:
+                continue
             widget.hide()
             widget.deleteLater()
             continue
         child_layout = layout_item.layout()
         if child_layout is not None:
-            _clear_layout(child_layout)
+            _clear_layout(child_layout, keep=keep)
             child_layout.deleteLater()
 
 
