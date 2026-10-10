@@ -352,20 +352,6 @@ async def run_bridge(
     companion = None
     startup_started = time.perf_counter()
     try:
-        stage_started = time.perf_counter()
-        await channel.start(controller.handle)
-        logger.info(
-            "工作台启动计时: 微信通道 ready elapsed=%.3fs",
-            time.perf_counter() - stage_started,
-        )
-        resolver.configure_session_bindings(channel.resolved_session_bindings)
-        stage_started = time.perf_counter()
-        conversations = await channel.list_allowlisted_conversations_initial()
-        logger.info(
-            "工作台启动计时: 会话列表 loaded count=%d elapsed=%.3fs",
-            len(conversations),
-            time.perf_counter() - stage_started,
-        )
         from agent_bridge.companion.avatars import AvatarCache
 
         avatar_cache = AvatarCache(Path(config.runtime.database).parent / "avatars")
@@ -388,12 +374,13 @@ async def run_bridge(
             companion = WeChatCompanionWindow(
                 config.wechat.companion,
                 controller,
-                conversations,
+                [],
                 lambda: channel.main_window_handle,
                 load_geometry,
                 save_geometry,
                 avatar_cache=avatar_cache,
                 conversation_loader=channel.list_allowlisted_conversations,
+                loading=True,
             )
             if lifecycle is not None:
                 lifecycle.show_requested.connect(companion._expand_from_launcher)
@@ -414,7 +401,7 @@ async def run_bridge(
         print(
             "Agent bridge is running. Close the companion window or press Ctrl+C to stop."
         )
-        await companion.run()
+        await _run_workbench_startup(companion, channel, controller, resolver)
     finally:
         if lifecycle is not None:
             lifecycle.begin_shutdown()
@@ -459,6 +446,8 @@ def doctor(config: AppConfig) -> int:
         )
         checks.append(("dependency_pyside6", _module_exists("PySide6"), "PySide6"))
         checks.append(("dependency_qasync", _module_exists("qasync"), "qasync"))
+        for module in ("pefile", "yara", "psutil"):
+            checks.append((f"dependency_{module}", _module_exists(module), module))
         checks.append(
             (
                 "wechat_companion",
@@ -569,6 +558,55 @@ def list_sessions(config: AppConfig) -> None:
 
 def _module_exists(name: str) -> bool:
     return importlib.util.find_spec(name) is not None
+
+
+async def _run_workbench_startup(companion, channel, controller, resolver):
+    """Paint the actual workbench first; hydrate that same window asynchronously."""
+    window_task = asyncio.create_task(companion.run())
+    initialization = None
+    try:
+        # Give Qt a paint turn before any database/key initialization starts.
+        await asyncio.sleep(0.01)
+        if companion.is_closed:
+            return
+
+        async def initialize():
+            stage_started = time.perf_counter()
+            await channel.start(controller.handle)
+            logger.info(
+                "工作台启动计时: 微信通道 ready elapsed=%.3fs",
+                time.perf_counter() - stage_started,
+            )
+            if companion.is_closed:
+                return
+            resolver.configure_session_bindings(channel.resolved_session_bindings)
+            companion.set_loading_stage("正在加载会话列表")
+            stage_started = time.perf_counter()
+            conversations = await channel.list_allowlisted_conversations_initial()
+            logger.info(
+                "工作台启动计时: 会话列表 loaded count=%d elapsed=%.3fs",
+                len(conversations),
+                time.perf_counter() - stage_started,
+            )
+            companion.complete_startup(conversations)
+
+        initialization = asyncio.create_task(initialize())
+        try:
+            # Cancelling to_thread does not stop its worker. Drain initialization
+            # before run_bridge closes the shared repository/channel resources.
+            await asyncio.shield(initialization)
+        except Exception:
+            logger.exception("工作台后台初始化失败")
+            if not companion.is_closed:
+                companion.fail_startup()
+                await window_task
+            raise
+        await window_task
+    finally:
+        companion.close()
+        if initialization is not None and not initialization.done():
+            await asyncio.gather(initialization, return_exceptions=True)
+        await window_task
 
 
 def run_bridge_with_qt(

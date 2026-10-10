@@ -3,6 +3,24 @@ from pathlib import Path
 import pytest
 
 
+def test_chatlog_runtime_dependencies_and_license_are_packaged():
+    tomllib = pytest.importorskip('tomllib')
+
+    root = Path(__file__).resolve().parents[1]
+    config = tomllib.loads((root / 'pyproject.toml').read_text(encoding='utf-8'))
+    for extra in ('wechat', 'all'):
+        dependencies = config['project']['optional-dependencies'][extra]
+        assert all(any(dep.startswith(name + '>=') for dep in dependencies)
+                   for name in ('pefile', 'yara-python', 'psutil'))
+    spec = (root / 'packaging/agent_bridge.spec').read_text(encoding='utf-8')
+    assert all(f'"{name}"' in spec for name in ('pefile', 'yara', 'psutil', 'win32crypt'))
+    assert all(any(dep.startswith('pywin32>=') for dep in config['project']['optional-dependencies'][extra])
+               for extra in ('wechat', 'all'))
+    assert 'chatlog-LICENSE.txt' in spec
+    assert 'assets/*LICENSE.txt' in config['tool']['setuptools']['package-data']['agent_bridge']
+    assert 'Copyright (c) 2026 anpingjing' in (root / 'agent_bridge/assets/chatlog-LICENSE.txt').read_text()
+
+
 @pytest.mark.parametrize(
     "asset,signatures",
     [

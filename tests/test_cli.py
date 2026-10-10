@@ -66,6 +66,8 @@ class FakeSignal:
 
 
 def install_fake_qt(monkeypatch: pytest.MonkeyPatch, run_callback):
+    # Fake UI runs must never reclaim a real workbench owned by the user.
+    monkeypatch.setattr(cli, "_reclaim_legacy_bridge_processes", lambda _path: None)
     class FakeApplication:
         last_instance = None
 

@@ -92,6 +92,9 @@ class ManagerCheckSession:
             )
         dependencies = {
             "微信组件": "wechatauto",
+            "微信只读扫描（PE）": "pefile",
+            "微信只读扫描（YARA）": "yara",
+            "微信进程检测": "psutil",
             "PySide6": "PySide6",
             "qasync": "qasync",
         }

@@ -8,12 +8,17 @@ project_root = Path(SPECPATH).resolve().parent
 datas = [
     (str(project_root / "config.example.yaml"), "."),
     (str(project_root / "agent_bridge" / "assets" / "manager-tray.png"), "agent_bridge/assets"),
+    (str(project_root / "agent_bridge" / "assets" / "chatlog-LICENSE.txt"), "agent_bridge/assets"),
 ]
 binaries = []
 hiddenimports = ["agent_bridge.cli", "agent_bridge.manager_main"]
 
 for package in (
     "wechatauto",
+    "pefile",
+    "yara",
+    "psutil",
+    "win32crypt",
     "uiautomation",
     "openai_codex",
     "codex_cli_bin",

@@ -97,6 +97,50 @@ def calculate_launcher_geometry(wechat_client: WindowRect) -> WindowGeometry:
 class Win32WindowProbe:
     def __init__(self, user32: Any | None = None) -> None:
         self._user32 = user32
+        self._main_handle: int | None = None
+        self._main_identity: tuple[int, str] | None = None
+        self._next_discovery = 0.0
+
+    def main_window_handle(self) -> int | None:
+        """Find the main shell without waiting for database/sender startup or UIA."""
+        if os.name != "nt":
+            return None
+        import psutil
+        import win32gui
+        import win32process
+
+        from agent_bridge.senders.uia_driver import SilentWeChatUiaDriver
+
+        try:
+            if self._main_handle and (
+                SilentWeChatUiaDriver._native_window_identity(self._main_handle)
+                == self._main_identity
+            ):
+                return self._main_handle
+            self._main_handle = None
+            now = time.monotonic()
+            if now < self._next_discovery:
+                return None
+            self._next_discovery = now + 1.0
+            matches = []
+
+            def inspect_window(handle, _context):
+                if not SilentWeChatUiaDriver._is_native_main_shell(handle):
+                    return
+                _, pid = win32process.GetWindowThreadProcessId(handle)
+                try:
+                    if psutil.Process(pid).name().lower() in {"weixin.exe", "wechat.exe"}:
+                        matches.append(handle)
+                except psutil.Error:
+                    pass
+
+            win32gui.EnumWindows(inspect_window, None)
+            if len(matches) == 1:
+                self._main_handle = matches[0]
+                self._main_identity = SilentWeChatUiaDriver._native_window_identity(matches[0])
+            return self._main_handle
+        except (OSError, win32gui.error):
+            return None
 
     def snapshot(self, hwnd: int | None) -> WindowSnapshot:
         if not hwnd:

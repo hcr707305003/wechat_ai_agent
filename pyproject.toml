@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-session-bridge"
-version = "0.1.6"
+version = "0.1.7"
 description = "Bridge messaging channels to persistent Codex and Claude sessions"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,7 +14,11 @@ dependencies = [
 
 [project.optional-dependencies]
 wechat = [
+    "pywin32>=306; sys_platform == 'win32'",
     "wechatauto-replica>=1.1.8,<2",
+    "pefile>=2023.2.7,<2025",
+    "yara-python>=4.5,<5",
+    "psutil>=5.9,<8",
     "uiautomation>=2.0.0,<3",
     "PySide6>=6.8,<6.9",
     "qasync>=0.27,<1",
@@ -22,7 +26,11 @@ wechat = [
 codex = ["openai-codex>=0.147.0,<1"]
 claude = ["claude-agent-sdk>=0.2.145,<1"]
 all = [
+    "pywin32>=306; sys_platform == 'win32'",
     "wechatauto-replica>=1.1.8,<2",
+    "pefile>=2023.2.7,<2025",
+    "yara-python>=4.5,<5",
+    "psutil>=5.9,<8",
     "uiautomation>=2.0.0,<3",
     "PySide6>=6.8,<6.9",
     "qasync>=0.27,<1",
@@ -42,7 +50,7 @@ agent-bridge-manager = "agent_bridge.manager_main:main"
 include = ["agent_bridge*"]
 
 [tool.setuptools.package-data]
-agent_bridge = ["assets/*.png"]
+agent_bridge = ["assets/*.png", "assets/*LICENSE.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

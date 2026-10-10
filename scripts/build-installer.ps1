@@ -1,7 +1,7 @@
 param(
     [string]$Python = ".\.venv\Scripts\python.exe",
     [string]$InnoCompiler = "",
-    [string]$Version = "0.1.6",
+    [string]$Version = "0.1.7",
     [switch]$SkipTests
 )
 
@@ -69,6 +69,7 @@ if (-not $InnoCompiler) {
 if (-not $InnoCompiler -or -not (Test-Path -LiteralPath $InnoCompiler -PathType Leaf)) {
     throw 'Inno Setup compiler was not found. Install Inno Setup 7 (or 6) or pass -InnoCompiler C:\path\to\ISCC.exe'
 }
+$InnoCompiler = (Resolve-Path -LiteralPath $InnoCompiler).Path
 
 Push-Location (Join-Path $projectRoot 'packaging')
 try {

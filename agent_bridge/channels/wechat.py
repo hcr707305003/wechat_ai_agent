@@ -367,6 +367,7 @@ class WeChatChannelAdapter(ChannelAdapter):
         }
         self._resolved_session_bindings = settings.session_bindings
         self._display_name_cache: dict[str, str] = {}
+        self._startup_contact_matches: dict[str, list[dict[str, Any]]] = {}
         self._self_sender_ids: set[str] = {"2"}
         self._self_sender_usernames: set[str] = set()
         self._pending_outbound: deque[tuple[str, str, ContentType, float]] = deque()
@@ -472,14 +473,14 @@ class WeChatChannelAdapter(ChannelAdapter):
     def _start_blocking(self) -> None:
         started = time.perf_counter()
         try:
-            from wechatauto import WeChatDB
             from wechatauto.db import Listener
+            from agent_bridge.channels.wechat_database import open_wechat_database
         except ImportError as exc:
             raise RuntimeError(
                 "WeChat adapter requires: pip install -e .[wechat]"
             ) from exc
         self._db = _SerializedWeChatDb(
-            WeChatDB(account=self.settings.account), self._db_lock
+            open_wechat_database(self.settings.account), self._db_lock
         )
         logger.info(
             "微信通道启动计时: WeChatDB ready elapsed=%.3fs",
@@ -1418,17 +1419,56 @@ class WeChatChannelAdapter(ChannelAdapter):
         except (OSError, RuntimeError, TypeError, ValueError):
             session_ids = set()
             logger.warning("读取微信会话索引失败，白名单将按原值监听", exc_info=True)
-        self._resolved_private_ids = self._resolve_allowlist_entries(
-            self.settings.allowed_private_ids,
-            ConversationType.PRIVATE,
-            session_ids,
-        )
-        self._resolved_group_ids = self._resolve_allowlist_entries(
-            self.settings.allowed_group_ids,
-            ConversationType.GROUP,
-            session_ids,
-        )
-        self._resolved_session_bindings = self._resolve_session_bindings(session_ids)
+        self._startup_contact_matches = self._prefetch_startup_contacts(session_ids)
+        try:
+            self._resolved_private_ids = self._resolve_allowlist_entries(
+                self.settings.allowed_private_ids,
+                ConversationType.PRIVATE,
+                session_ids,
+            )
+            self._resolved_group_ids = self._resolve_allowlist_entries(
+                self.settings.allowed_group_ids,
+                ConversationType.GROUP,
+                session_ids,
+            )
+            self._resolved_session_bindings = self._resolve_session_bindings(session_ids)
+        finally:
+            # Only share one startup snapshot, not stale results for later lookups.
+            self._startup_contact_matches = {}
+
+    def _prefetch_startup_contacts(self, session_ids: set[str]) -> dict[str, list[dict[str, Any]]]:
+        keywords = tuple(dict.fromkeys(
+            value for value in (*self.settings.allowed_private_ids,
+                                *self.settings.allowed_group_ids,
+                                *(binding.conversation_id for binding in self.settings.session_bindings))
+            if value != "filehelper" and value not in session_ids
+        ))
+        if not keywords:
+            return {}
+        started = time.perf_counter()
+        try:
+            with self._db_lock:
+                for rel, path, _ in getattr(self._db, "_db_files", ()):
+                    if Path(path).name != "contact.db":
+                        continue
+                    connection = self._db._open(rel)
+                    try:
+                        result = {}
+                        for keyword in keywords:
+                            rows = connection.execute(
+                                "SELECT username, nick_name, remark FROM contact "
+                                "WHERE nick_name LIKE ? OR remark LIKE ? OR username LIKE ? "
+                                "OR alias LIKE ? LIMIT 50", (f"%{keyword}%",) * 4,
+                            ).fetchall()
+                            result[keyword] = [dict(row) for row in rows]
+                    finally:
+                        connection.close()
+                    logger.info("微信启动联系人解析: 共用一次快照 keywords=%d elapsed=%.3fs",
+                                len(keywords), time.perf_counter() - started)
+                    return result
+        except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error):
+            logger.warning("微信启动联系人批量读取不可用，回退逐项解析")
+        return {}
 
     def _resolve_session_bindings(
         self, session_ids: set[str]
@@ -1519,7 +1559,9 @@ class WeChatChannelAdapter(ChannelAdapter):
         if value == "filehelper" or value in session_ids:
             return value
         try:
-            matches = self._db.search_contact(value)
+            matches = self._startup_contact_matches.get(value)
+            if matches is None:
+                matches = self._db.search_contact(value)
         except (OSError, RuntimeError, TypeError, ValueError):
             logger.warning("微信白名单联系人查询失败: %s", value, exc_info=True)
             return value

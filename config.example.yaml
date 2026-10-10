@@ -31,6 +31,7 @@ agents: # Codex / Claude 至少启用并安装一个即可；缺失项在管理�
 channels:
   wechat:
     enabled: true
+    # 消息读取默认使用 chatlog 只读密钥恢复；多账号时必须唯一指定账号目录名。
     account: null
     allowed_private_ids:
       - filehelper

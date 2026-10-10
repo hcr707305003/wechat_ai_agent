@@ -50,6 +50,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -73,6 +74,7 @@ from agent_bridge.companion.models import (
     TimelineEntry,
 )
 from agent_bridge.companion.qt_widgets import ConversationRow, MessageCard
+from agent_bridge.companion.startup import StartupPanel
 from agent_bridge.companion.theme import build_stylesheet, resolve_theme
 
 logger = logging.getLogger(__name__)
@@ -412,6 +414,7 @@ class WeChatCompanionWindow(QMainWindow):
         avatar_cache: AvatarCache | None = None,
         conversation_loader: Callable[[], Awaitable[list[ConversationItem]]]
         | None = None,
+        loading: bool = False,
     ) -> None:
         super().__init__()
         app = QApplication.instance()
@@ -429,6 +432,7 @@ class WeChatCompanionWindow(QMainWindow):
         self.owner = owner or Win32WindowOwner()
         self.avatar_cache = avatar_cache
         self.conversation_loader = conversation_loader
+        self._loading = loading
         self._app = app
         self._signal_bus = CompanionSignalBus(self)
         self._signal_bus.updated.connect(self._handle_update)
@@ -469,7 +473,7 @@ class WeChatCompanionWindow(QMainWindow):
         self._build_ui()
         self.launcher = CompanionLauncher(self._expand_from_launcher)
         self.resize(settings.width, settings.height)
-        if settings.mode == "independent":
+        if settings.mode == "independent" and not loading:
             self._restore_geometry(load_geometry())
 
         self._apply_theme()
@@ -494,6 +498,54 @@ class WeChatCompanionWindow(QMainWindow):
         self._profile_refresh_timer.setInterval(10 * 60 * 1000)
         self._profile_refresh_timer.timeout.connect(self._schedule_profile_refresh)
         self._first_show_logged = False
+        if loading:
+            self.loading_panel.start()
+            self.conversation_list.setEnabled(False)
+            self.history_page_button.hide()
+            self.timeline_stack.setCurrentWidget(self.loading_panel)
+            self.set_loading_stage("正在连接微信，准备数据库和白名单")
+
+    @property
+    def is_closed(self) -> bool:
+        return self._closed_event.is_set()
+
+    def set_loading_stage(self, text: str) -> None:
+        self.loading_panel.set_stage(text)
+        self.title_label.setText("正在加载工作台")
+        self.session_label.setText("后台初始化中")
+        self.status_label.setText("正在加载 · 请稍候")
+
+    def fail_startup(self) -> None:
+        self.loading_panel.fail()
+        self.title_label.setText("工作台加载失败")
+        self.session_label.setText("请查看日志")
+        self.status_label.setText("加载失败 · 可关闭后重试")
+
+    def complete_startup(self, conversations: list[ConversationItem]) -> None:
+        if self.is_closed:
+            return
+        self._loading = False
+        self.loading_panel.finish()
+        self.timeline_stack.setCurrentWidget(self.timeline_scroll)
+        self.conversation_list.setEnabled(True)
+        self.conversations = conversations
+        self._selected_index = -1
+        self._refresh_conversation_list()
+        if conversations:
+            # currentRowChanged selects the conversation and schedules history.
+            self.conversation_list.setCurrentRow(0)
+        else:
+            self._render_selected()
+        if self.settings.mode == "independent":
+            self._restore_geometry(self.load_geometry())
+        self._start_ready_services()
+
+    def _start_ready_services(self) -> None:
+        self._follow_wechat_window()
+        self._schedule_all_avatar_refreshes()
+        if self.conversation_loader is not None:
+            self._schedule_profile_refresh()
+            self._profile_refresh_timer.start()
 
     async def run(self) -> None:
         show_started = time.perf_counter()
@@ -504,13 +556,11 @@ class WeChatCompanionWindow(QMainWindow):
             time.perf_counter() - show_started,
         )
         QTimer.singleShot(0, self._log_first_paint)
-        self._follow_wechat_window()
-        self._schedule_all_avatar_refreshes()
-        if self.conversation_loader is not None:
-            self._schedule_profile_refresh()
-            self._profile_refresh_timer.start()
         if self.settings.mode == "docked":
+            self._follow_wechat_window()
             self._follow_timer.start()
+        if not self._loading:
+            self._start_ready_services()
         await self._closed_event.wait()
 
     def _log_first_paint(self) -> None:
@@ -608,10 +658,11 @@ class WeChatCompanionWindow(QMainWindow):
                 self._render_selected()
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self.loading_panel.finish()
         self.launcher.shutdown()
         if self._history_page_task is not None:
             self._history_page_task.cancel()
-        if self.settings.mode == "independent":
+        if self.settings.mode == "independent" and not self._loading:
             try:
                 self.save_geometry(self._current_geometry())
             except (OSError, RuntimeError, TypeError, ValueError):
@@ -849,7 +900,11 @@ class WeChatCompanionWindow(QMainWindow):
         self.history_latest_button.clicked.connect(self._return_to_latest)
         self.history_latest_button.hide()
         main_layout.addWidget(self.history_latest_button)
-        main_layout.addWidget(self.timeline_scroll, 1)
+        self.timeline_stack = QStackedWidget()
+        self.timeline_stack.addWidget(self.timeline_scroll)
+        self.loading_panel = StartupPanel(self.timeline_stack)
+        self.timeline_stack.addWidget(self.loading_panel)
+        main_layout.addWidget(self.timeline_stack, 1)
         outer.addWidget(main, 1)
 
         self.settings_panel = self._build_settings_panel()
@@ -2054,6 +2109,10 @@ class WeChatCompanionWindow(QMainWindow):
         if self._group_move_active:
             return
         wechat_handle = self.hwnd_provider()
+        if not wechat_handle:
+            discover = getattr(self.probe, "main_window_handle", None)
+            if discover is not None:
+                wechat_handle = discover()
         snapshot = self.probe.snapshot(wechat_handle)
         if self._collapsed:
             self._follow_collapsed_launcher(wechat_handle, snapshot)
@@ -2196,6 +2255,8 @@ class WeChatCompanionWindow(QMainWindow):
         self._last_follow_geometry = ""
 
     def _set_follow_status(self, text: str, *, state: str = "info") -> None:
+        if self._loading:
+            return
         if self._sender_state not in {"idle", "sent", "cancelled"}:
             self._render_sender_status()
             return

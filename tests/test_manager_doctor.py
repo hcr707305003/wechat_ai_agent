@@ -61,3 +61,32 @@ def test_check_exception_is_a_failure_result() -> None:
     assert not result.ok
     assert result.name == "组件"
     assert result.detail == "dependency probe failed"
+
+
+def test_scanner_dependency_checks_do_not_read_wechat(monkeypatch):
+    from agent_bridge.manager import doctor
+    from agent_bridge.channels import chatlog_keys
+
+    def forbidden(*args): raise AssertionError('preflight must not scan processes')
+    monkeypatch.setattr(chatlog_keys, 'recover_master_key', forbidden)
+    monkeypatch.setattr(doctor.importlib.util, 'find_spec', lambda _: None)
+    session = ManagerCheckSession(Path(__file__).resolve().parents[1] / 'config.example.yaml')
+    assert session.tasks[0].run().ok
+    tasks = [task for task in session.tasks if '只读扫描' in task.name or task.name == '微信进程检测']
+    assert len(tasks) == 3
+    assert all(not task.run().ok for task in tasks)
+
+
+def test_cli_doctor_reports_missing_scanner_dependency(monkeypatch, capsys):
+    from agent_bridge import cli
+    from agent_bridge.agents import availability
+    from agent_bridge.agents.availability import AgentAvailability
+    from agent_bridge.config import load_config
+    from agent_bridge.senders.uia_driver import SilentWeChatUiaDriver
+
+    config = load_config(Path(__file__).resolve().parents[1] / 'config.example.yaml')
+    monkeypatch.setattr(cli, '_module_exists', lambda name: name != 'yara')
+    monkeypatch.setattr(SilentWeChatUiaDriver, 'probe_capabilities', lambda _: (True, 'fake'))
+    monkeypatch.setattr(availability, 'configured_availability', lambda _: {'codex': AgentAvailability(True, 'fake')})
+    assert cli.doctor(config) == 1
+    assert '[FAIL] dependency_yara: yara' in capsys.readouterr().out

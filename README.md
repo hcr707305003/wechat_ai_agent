@@ -1,6 +1,6 @@
 # Agent Session Bridge
 
-一个面向渠道和 Agent 的双向适配层。首版通过 `wechatauto-replica` 接入 Windows 微信，并将每个私聊或群聊映射为一个持久化 `UnifiedSession`。同一逻辑 session 可选择 Codex 或 Claude，底层原生 thread/session ID 和统一消息历史由 SQLite 保存。
+一个面向渠道和 Agent 的双向适配层。Windows 微信消息读取采用 `wechat-chatlog-decrypt-export` 的只读密钥恢复方案，配合 `wechatauto-replica` 数据库解析和增量监听，将每个私聊或群聊映射为一个持久化 `UnifiedSession`。同一逻辑 session 可选择 Codex 或 Claude，底层原生 thread/session ID 和统一消息历史由 SQLite 保存。
 
 ## 管理面板演示
 
@@ -9,6 +9,16 @@
 ![Agent Bridge 管理面板操作演示](assets/manager-demo.gif)
 
 演示中的微信号、群 ID、本机路径和日志内容已遮盖；安装和配置说明见下文。
+
+## 微信消息读取
+
+默认接入 [wechat-chatlog-decrypt-export](https://github.com/anpingjing/wechat-chatlog-decrypt-export) 的静态 XOR 特征提取、只读内存候选扫描和数据库首页面 HMAC 校验方法（固定参考版本 `4ec68b7`），不运行该仓库的批量历史导出器或调试器。保留现有消息 ID、增量监听进度、历史分页、引用验证和 Webhook 处理。
+
+- 微信需要已登录；存在多个本地账号时，必须通过 `channels.wechat.account` 唯一指定账号，不能自动猜选最近使用者。
+- 密钥扫描放在独立子进程：90 秒扫描限时、120 秒硬限时，最多扫描 1 GiB 内存、128 个候选；只申请读取权限，不注入、不调试、不重启微信。超时只结束该扫描子进程。启动时先打开完整工作台，在聊天区域显示 loading、当前阶段和已等待时间；数据库与会话异步加载完成后原地显示，不再弹出独立加载窗。加载失败在原窗口提示，详情记录到日志。
+- 提取失败会阻止通道启动并记录原因，不自动切回旧密钥扫描或无限重试。主密钥使用 Windows 当前用户 DPAPI 加密，按账号目录隔离保存在 `%LOCALAPPDATA%/AgentBridge/cache/chatlog-keys`；每次复用前先校验当前联系人数据库首页 HMAC。缓存损坏、无法解密或校验失败时重新扫描；加密保存失败不阻止本次运行，也不会降级明文保存。日志不输出密钥，旧版本的明文密钥缓存不会自动删除。数据库解密快照仍由原读取器保存在本机临时目录，包含聊天数据，不应上传或公开。
+- 数据库消息记录可读不等于媒体文件一定可用。图片解密仍沿用既有图片密钥和本地缓存流程，未将数据库密钥当作图片密钥；视频、语音能力不因此自动扩展。
+- 源码运行请更新依赖：`python -m pip install -e ".[wechat]"`。打包配置已包含 `pefile`、`yara-python`、`psutil`、Windows 加密组件 `pywin32` 和上游许可证。管理面板只检查依赖，不提前扫描微信密钥。首次启动仍需扫描，后续启动才能利用已校验的缓存；日志会分开记录缓存命中、扫描和数据库派生耗时，避免混淆瓶颈。
 
 ## 微信工作台预览
 
